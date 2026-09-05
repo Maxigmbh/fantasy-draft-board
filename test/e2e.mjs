@@ -84,10 +84,10 @@ await check('Board laedt und zeigt Tiers statt einer endlosen Liste', async () =
 
 await check('Tier laesst sich auf- und wieder zuklappen', async () => {
   const second = page.locator('.tier').nth(1);
-  await second.locator('.tier__head').click();
+  await second.locator('.tier__band').click();
   assert.equal(await page.locator('.tier .list').count(), 2, 'zweiter Tier offen');
-  assert.equal(await second.locator('.tier__head').getAttribute('aria-expanded'), 'true');
-  await second.locator('.tier__head').click();
+  assert.equal(await second.locator('.tier__band').getAttribute('aria-expanded'), 'true');
+  await second.locator('.tier__band').click();
   assert.equal(await page.locator('.tier .list').count(), 1, 'wieder zu');
 });
 
@@ -115,9 +115,10 @@ await check('Positionsfilter zeigt nur diese Position', async () => {
   await page.check('#fExpandAll');
   const badges = await page.locator('.row:not(.row--head) .pos').allInnerTexts();
   assert.ok(badges.length > 40, `${badges.length} Zeilen`);
-  assert.ok(badges.every((b) => b === 'RB'), 'nur RB');
+  assert.ok(badges.every((b) => /^RB\d+$/.test(b)), `nur RB, war: ${badges.slice(0, 3)}`);
   await page.click('.tab[data-pos="FLEX"]');
-  const flex = new Set(await page.locator('.row:not(.row--head) .pos').allInnerTexts());
+  const flex = new Set((await page.locator('.row:not(.row--head) .pos').allInnerTexts())
+    .map((t) => t.replace(/\d+$/, '')));
   assert.deepEqual([...flex].sort(), ['RB', 'TE', 'WR']);
 });
 
@@ -133,7 +134,7 @@ await check('Suche findet einen einzelnen Spieler', async () => {
 await check('Sortierung nach Experten-Ranking ordnet neu', async () => {
   const byScore = await page.locator('.row:not(.row--head) .c--name b').first().innerText();
   await page.selectOption('#fSort', 'ecr');
-  const ecrs = (await page.locator('.row:not(.row--head) .c--num').nth(0).innerText());
+  const ecrs = await page.locator('.row:not(.row--head)').first().locator('.c--num').nth(3).innerText();
   const first = await page.locator('.row:not(.row--head) .c--name b').first().innerText();
   assert.ok(Number(ecrs) < 3, `bestes ECR zuerst (${ecrs})`);
   assert.ok(byScore !== first || true, `Score: ${byScore}, ECR: ${first}`);
@@ -169,11 +170,40 @@ await check('Bei Gewichtung null steht exakt die Expertenrangliste', async () =>
   await page.click('#toggleWeights');
 });
 
+await check('Tabelle zeigt die Spalten der Vorlage', async () => {
+  // text-transform: uppercase schlaegt auf innerText durch — case-insensitiv pruefen.
+  const head = (await page.locator('.row--head').first().innerText()).toLowerCase();
+  for (const label of ['rk', 'pick', 'spieler', 'pos', 'alter', 'best', 'worst', 'ecr', 'bye', 'off', 'sos', 'score']) {
+    assert.ok(head.includes(label), `Spalte ${label} fehlt in: ${head.replace(/\s+/g, ' ')}`);
+  }
+  assert.ok(!/Std|ADP/i.test(head), 'keine Std.Dev- und keine ADP-Spalte');
+  const first = page.locator('.row:not(.row--head)').first();
+  // .c--name ist ein Flex-Container: innerText trennt die Kinder mit Zeilenumbruch.
+  const nameCell = (await first.locator('.c--name').innerText()).replace(/\s+/g, ' ').trim();
+  assert.match(nameCell, /^.+ \(\w{2,3}\)/, `Name mit Team in Klammern, war: ${nameCell}`);
+  assert.match(await first.locator('.c--pos').innerText(), /^(QB|RB|WR|TE|K|DST)\d+$/, 'Position mit Rang');
+  const age = Number(await first.locator('.c--num').first().innerText());
+  assert.ok(age > 19 && age < 42, `plausibles Alter (${age})`);
+});
+
+await check('Checkbox markiert, ohne die Zeile aufzuklappen', async () => {
+  await page.uncheck('#fHideDrafted');
+  const first = page.locator('.row:not(.row--head)').first();
+  const name = await first.locator('.c--name b').innerText();
+  await first.locator('.c--check input').click();
+  assert.equal(await page.locator('.detail').count(), 0, 'Detailzeile bleibt zu');
+  const marked = page.locator('.row--drafted').first();
+  assert.equal(await marked.locator('.c--name b').innerText(), name, 'derselbe Spieler ist markiert');
+  assert.equal(await page.locator('.row--drafted').count(), 1);
+  assert.ok(await marked.locator('.c--check input').isChecked(), 'Haken gesetzt');
+  await page.check('#fHideDrafted');
+});
+
 await check('Detailansicht zeigt Kennzahlen und Wochenspielplan', async () => {
   await page.locator('.row:not(.row--head)').first().click();
   await page.waitForSelector('.detail');
   const text = await page.locator('.detail').innerText();
-  for (const label of ['Experten-Ranking', 'Redraft-Ranking', 'Anpassung']) {
+  for (const label of ['Experten-Ranking', 'Redraft-Ranking', 'Anpassung', 'Uneinigkeit', 'Handelswert']) {
     assert.ok(text.includes(label), `${label} im Detail`);
   }
   assert.ok(await page.locator('.detail .week').count() >= 17, 'Spielplan mit Bye');
@@ -182,8 +212,8 @@ await check('Detailansicht zeigt Kennzahlen und Wochenspielplan', async () => {
 
 await check('Spieler laesst sich als weg markieren und ausblenden', async () => {
   const total = await page.evaluate(() => window.__board.players.length);
-  await page.locator('.row:not(.row--head)').first().click();
-  await page.click('[data-action="draft"]');
+  // Bei aktivem "Weg ausblenden" verschwindet die Zeile sofort — genau so soll es sein.
+  await page.locator('.row:not(.row--head)').first().locator('.c--check input').click();
   assert.match(await page.locator('#listMeta').innerText(), /1 weg/);
   assert.match(await page.locator('#listMeta').innerText(), new RegExp(`${total - 1} Spieler`));
   await page.uncheck('#fHideDrafted');

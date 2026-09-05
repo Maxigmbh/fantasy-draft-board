@@ -21,7 +21,7 @@ aktualisiert die FantasyPros-Rankings täglich.
 
 | Quelle | Inhalt | Aktualität |
 | --- | --- | --- |
-| [dynastyprocess/data](https://github.com/dynastyprocess/data) | FantasyPros Expert Consensus Rankings (Dynasty, Redraft, Rookies) | täglicher Scrape |
+| [dynastyprocess/data](https://github.com/dynastyprocess/data) | FantasyPros ECR (Dynasty, Redraft, Rookies), Spieler-Stammdaten mit Alter und Draft-Jahrgang, Dynasty-Handelswerte | täglicher Scrape |
 | [nflverse/nfldata](https://github.com/nflverse/nfldata) | Kompletter NFL-Spielplan inklusive Wettquoten | laufend |
 | [hvpkod/NFL-Data](https://github.com/hvpkod/NFL-Data) | Fantasy-Punkte je Spieler der Vorsaison | wöchentlich |
 
@@ -59,3 +59,18 @@ anderes Signal.
   sind Modellschätzungen, keine Marktpreise.
 - Es gibt keinen Verletzungs-Feed. Aktuelle Ausfälle stecken indirekt in der
   Redraft-Rangliste und damit in der Liste der versteckten Werte.
+
+## Alter, Rookie-Status und Marktwert
+
+`db_playerids.csv` liefert Alter, Geburtsdatum und Draft-Jahrgang. Die
+Zuordnung läuft über die FantasyPros-ID aus der Rangliste und ist damit
+eindeutig; der Name dient nur als Rückfall. Abdeckung: 461 von 484 Spielern.
+
+Als Rookie gilt, wer im Draft der laufenden Saison gezogen wurde oder in der
+FantasyPros-Rookie-Rangliste steht.
+
+FantasyPros veröffentlicht seine ADP nicht offen. Statt einer ADP-Spalte
+vergleicht das Board deshalb den Dynasty-Handelswert aus `values-players.csv`
+mit dem Expertenranking. Der Handelswert entsteht aus tatsächlichen
+Tauschgeschäften und ist damit das ehrlichere Marktsignal. Die Abweichung
+steht in der Detailzeile, nicht als Tabellenspalte.

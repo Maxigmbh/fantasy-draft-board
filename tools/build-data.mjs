@@ -196,6 +196,35 @@ function main() {
   const redraftByName = new Map(redraft.map((r) => [nameKey(r.player), num(r.ecr)]));
   const rookieNames = new Set(rookies.map((r) => nameKey(r.player)));
 
+  /* ---- 1b. Stammdaten: Alter und Draft-Jahrgang ---- */
+  // Der Schluessel `id` der Rangliste ist die FantasyPros-ID; ueber sie ist die
+  // Zuordnung eindeutig. Der Name dient nur als Rueckfall.
+  const idRows = loadCsv('dp-data', 'files', 'db_playerids.csv');
+  const bioById = new Map();
+  const bioByName = new Map();
+  for (const r of idRows) {
+    const bio = {
+      age: num(r.age),
+      birthdate: r.birthdate || null,
+      draftYear: num(r.draft_year),
+      draftRound: num(r.draft_round),
+      draftPick: num(r.draft_ovr),
+    };
+    if (r.fantasypros_id) bioById.set(r.fantasypros_id, bio);
+    if (r.name && !bioByName.has(nameKey(r.name))) bioByName.set(nameKey(r.name), bio);
+  }
+
+  /* ---- 1c. Marktwert als Gegenstueck zur ADP ---- */
+  // FantasyPros stellt seine ADP nicht offen bereit. Der Dynasty-Handelswert
+  // von DynastyProcess ist das naechstbeste Marktsignal: er entsteht aus
+  // tatsaechlichen Tauschgeschaeften, nicht aus Expertenmeinungen.
+  const valueRows = loadCsv('dp-data', 'files', 'values-players.csv');
+  const marketByName = new Map();
+  for (const r of valueRows) {
+    const value = num(r.value_1qb);
+    if (value !== null) marketByName.set(nameKey(r.player), value);
+  }
+
   /* ---- 2. Spielplan und Team-Ratings ---- */
   const games = loadCsv('nfldata', 'data', 'games.csv')
     .filter((g) => Number(g.season) === SEASON && g.game_type === 'REG');
@@ -313,7 +342,12 @@ function main() {
       const team = teamCode(r.team);
       const key = nameKey(r.player);
       const priorEntry = prior.get(`${key}|${pos}`) || null;
+      const bio = bioById.get(r.id) || bioByName.get(key) || {};
       return {
+        age: bio.age ?? null,
+        draftYear: bio.draftYear ?? null,
+        draftPick: bio.draftPick ?? null,
+        market: marketByName.get(key) ?? null,
         id: `${key.replace(/ /g, '-')}-${pos}`.toLowerCase(),
         name: r.player,
         pos,
@@ -326,7 +360,7 @@ function main() {
         rankDelta: num(r.rank_delta),
         owned: num(r.player_owned_avg),
         ecrRedraft: redraftByName.get(key) ?? null,
-        rookie: rookieNames.has(key),
+        rookie: rookieNames.has(key) || bio.draftYear === SEASON,
         priorPoints: priorEntry ? Number(priorEntry.points.toFixed(1)) : null,
         priorPosRank: priorEntry ? priorEntry.posRank : null,
       };
@@ -378,6 +412,17 @@ function main() {
   for (const p of players) {
     posRanks[p.pos] = (posRanks[p.pos] || 0) + 1;
     p.boardPosRank = posRanks[p.pos];
+  }
+
+  // Marktrang aus dem Handelswert. Positive Abweichung heisst: der Markt
+  // handelt ihn spaeter, als die Experten ihn einordnen — ein Schnaeppchen.
+  const withMarket = players.filter((p) => p.market !== null)
+    .sort((a, b) => b.market - a.market);
+  withMarket.forEach((p, i) => { p.marketRank = i + 1; });
+  const ecrOrder = [...players].sort((a, b) => a.ecr - b.ecr);
+  ecrOrder.forEach((p, i) => { p.ecrRank = i + 1; });
+  for (const p of players) {
+    p.marketDelta = p.marketRank ? p.marketRank - p.ecrRank : null;
   }
 
   assignTiers(players, (p) => p.pos);

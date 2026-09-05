@@ -35,18 +35,30 @@ wäre ein anderes Signal. Die Spalte *Vorj.* zeigt, was er zuletzt geleistet hat
 
 ## Die Spalten
 
+Layout und Spalten folgen der FantasyPros-Vorlage, ergänzt um die eigenen
+Kennzahlen. Standardabweichung und ECR-gegen-ADP sind bewusst nicht in der
+Tabelle — Erstere steht in der Detailzeile, Letztere gibt es in keiner offenen
+Quelle.
+
 | Spalte | Bedeutung |
 | --- | --- |
-| **Pick** | Runde und Pick bei 12 Teams — wo dieser Spieler nach eigener Rechnung fällt |
+| **RK** | Rang nach eigener Bewertung |
+| **☑** | Spieler als vergeben markieren |
+| **Pick** | Runde und Pick bei 12 Teams |
+| **Spieler (Team)** | Name und NFL-Team |
+| **Pos** | Position mit Rang innerhalb dieses Boards |
+| **Alter** | Alter in Jahren |
+| **Best / Worst** | bester und schlechtester Einzelrang unter den Experten |
 | **ECR** | Expert Consensus Ranking von FantasyPros, der Marktkonsens |
+| **Bye** | spielfreie Woche |
 | **Off** | Offense-Index des NFL-Teams, aus Wettquoten geschätzt |
 | **SoS** | Spielplan: wie durchlässig die Gegner-Defenses über die Saison sind |
-| **Vorj.** | Fantasy-Punkte der Vorsaison |
-| **Score** | eigene Bewertung, aus ECR plus den beiden Indizes |
+| **Score** | eigene Bewertung aus ECR plus den beiden Indizes |
 
-Grün und rot markieren Ausschläge über ±15 Punkte. Die Badges am Namen weisen
+Grün und rot markieren Ausschläge über ±15 Punkte. Badges am Namen weisen
 Rookies aus sowie Spieler, die deutlich später (**Wert**) oder früher
-(**Reach**) gehandelt werden, als das Board sie sieht.
+(**Reach**) einzuordnen wären, als das Board sie führt. Ein Klick auf die Zeile
+öffnet Kennzahlen, Wochenspielplan und den Vergleich mit dem Dynasty-Handelswert.
 
 ## Wie gerechnet wird
 

@@ -107,21 +107,29 @@ function playerRow(p, { showRank = true } = {}) {
   if (p.value >= 12) marks.push(`<span class="badge badge--good">Wert ${signed(p.value)}</span>`);
   else if (p.value <= -12) marks.push(`<span class="badge badge--warn">Reach ${signed(p.value)}</span>`);
 
+  const cell = (v, extra = '') => `<span class="c c--num ${extra}">${v}</span>`;
+  const tone = (x) => (x > 0.15 ? 'up' : (x < -0.15 ? 'down' : ''));
+
   return `
-    <li class="${cls.join(' ')}" data-id="${esc(p.id)}" data-pos="${esc(p.pos)}">
+    <li class="${cls.join(' ')}" data-id="${esc(p.id)}">
       <span class="c c--rank">${showRank ? p.rank : ''}</span>
+      <span class="c c--check">
+        <input type="checkbox" data-action="draft" data-id="${esc(p.id)}"
+               ${isDrafted ? 'checked' : ''} aria-label="${esc(p.name)} als vergeben markieren">
+      </span>
       <span class="c c--pick">${p.round}.${String(p.pickInRound).padStart(2, '0')}</span>
       <span class="c c--name">
-        <b>${esc(p.name)}</b>
+        <b>${esc(p.name)}</b><em>(${esc(p.team)})</em>
         ${marks.join('')}
       </span>
-      <span class="c c--pos"><i class="pos pos--${esc(p.pos)}">${esc(p.pos)}</i>${p.boardPosRank}</span>
-      <span class="c c--team">${esc(p.team)}</span>
-      <span class="c c--bye">${p.bye || '—'}</span>
-      <span class="c c--num" title="Expert Consensus Ranking von FantasyPros">${p.ecr.toFixed(1)}</span>
-      <span class="c c--num ${p.offenseIndex > 0.15 ? 'up' : p.offenseIndex < -0.15 ? 'down' : ''}">${signed(p.offenseIndex * 100)}</span>
-      <span class="c c--num ${p.sosIndex > 0.15 ? 'up' : p.sosIndex < -0.15 ? 'down' : ''}">${signed(p.sosIndex * 100)}</span>
-      <span class="c c--num">${p.priorPoints ?? '—'}</span>
+      <span class="c c--pos"><i class="pos pos--${esc(p.pos)}">${esc(p.pos)}${p.boardPosRank}</i></span>
+      ${cell(p.age !== null ? p.age.toFixed(1) : '—')}
+      ${cell(p.best ?? '—')}
+      ${cell(p.worst ?? '—')}
+      ${cell(p.ecr.toFixed(1))}
+      ${cell(p.bye || '—')}
+      ${cell(signed(p.offenseIndex * 100), tone(p.offenseIndex))}
+      ${cell(signed(p.sosIndex * 100), tone(p.sosIndex))}
       <span class="c c--score">${p.score.toFixed(1)}</span>
     </li>
     ${app.expanded === p.id ? detailRow(p) : ''}`;
@@ -131,7 +139,9 @@ function detailRow(p) {
   const team = app.data.teams[p.team];
   const facts = [
     ['Experten-Ranking', `${p.ecr.toFixed(1)}${p.best ? ` (best ${p.best}, worst ${p.worst})` : ''}`],
-    ['Uneinigkeit', p.sd ? p.sd.toFixed(2) : '—'],
+    ['Uneinigkeit der Experten', p.sd ? p.sd.toFixed(2) : '—'],
+    ['Handelswert vs. Ranking', p.marketDelta === null ? '—'
+      : `${signed(p.marketDelta)} Plätze${p.marketDelta > 0 ? ' — günstiger gehandelt' : ''}`],
     ['Redraft-Ranking', p.ecrRedraft ? p.ecrRedraft.toFixed(1) : '—'],
     [`Punkte ${app.data.meta.priorSeason}`, p.priorPoints ? `${p.priorPoints} (${p.pos}${p.priorPosRank})` : 'kein Vorjahreswert'],
     ['Besitzquote', p.owned ? `${Math.round(p.owned)} %` : '—'],
@@ -162,11 +172,18 @@ function detailRow(p) {
 
 const HEAD = `
   <li class="row row--head">
-    <span class="c c--rank">#</span><span class="c c--pick">Pick</span>
-    <span class="c c--name">Spieler</span><span class="c c--pos">Pos</span>
-    <span class="c c--team">Team</span><span class="c c--bye">Bye</span>
-    <span class="c c--num">ECR</span><span class="c c--num">Off</span>
-    <span class="c c--num">SoS</span><span class="c c--num">Vorj.</span>
+    <span class="c c--rank">RK</span>
+    <span class="c c--check"></span>
+    <span class="c c--pick">Pick</span>
+    <span class="c c--name">Spieler</span>
+    <span class="c c--pos">Pos</span>
+    <span class="c c--num">Alter</span>
+    <span class="c c--num">Best</span>
+    <span class="c c--num">Worst</span>
+    <span class="c c--num" title="Expert Consensus Ranking von FantasyPros">ECR</span>
+    <span class="c c--num">Bye</span>
+    <span class="c c--num" title="Offense-Staerke des Teams, aus Wettquoten geschaetzt">Off</span>
+    <span class="c c--num" title="Durchlaessigkeit der Gegner-Defenses ueber die Saison">SoS</span>
     <span class="c c--score">Score</span>
   </li>`;
 
@@ -189,11 +206,11 @@ function renderBoard() {
     const worst = g.players[g.players.length - 1];
     return `
       <section class="tier" data-tier="${g.tier}">
-        <button class="tier__head" data-tier="${g.tier}" aria-expanded="${open}">
+        <button class="tier__band" data-tier="${g.tier}" aria-expanded="${open}">
           <span class="tier__caret">${open ? '▾' : '▸'}</span>
           <span class="tier__name">Tier ${g.tier}</span>
           <span class="tier__meta">${g.players.length} Spieler · Score ${best.score.toFixed(1)}–${worst.score.toFixed(1)}</span>
-          <span class="tier__preview">${g.players.slice(0, 4).map((p) => esc(surname(p.name))).join(' · ')}${g.players.length > 4 ? ' …' : ''}</span>
+          <span class="tier__preview">${g.players.slice(0, 5).map((p) => esc(surname(p.name))).join(' · ')}${g.players.length > 5 ? ' …' : ''}</span>
         </button>
         ${open ? `<ol class="list">${HEAD}${g.players.map((p) => playerRow(p)).join('')}</ol>` : ''}
       </section>`;
@@ -347,19 +364,21 @@ function wire() {
   });
 
   $('views').addEventListener('click', (e) => {
-    const tierHead = e.target.closest('.tier__head');
+    const tierHead = e.target.closest('.tier__band');
     if (tierHead) {
       const t = Number(tierHead.dataset.tier);
       if (app.openTiers.has(t)) app.openTiers.delete(t); else app.openTiers.add(t);
       render();
       return;
     }
-    const draftBtn = e.target.closest('[data-action="draft"]');
-    if (draftBtn) {
-      const { id } = draftBtn.dataset;
+    const draftControl = e.target.closest('[data-action="draft"]');
+    if (draftControl) {
+      const { id } = draftControl.dataset;
       if (app.drafted.has(id)) app.drafted.delete(id); else app.drafted.add(id);
       save();
       render();
+      // Der Klick auf die Checkbox darf die Detailzeile nicht mit oeffnen.
+      e.stopPropagation();
       return;
     }
     const row = e.target.closest('.row');
