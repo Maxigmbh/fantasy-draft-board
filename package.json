@@ -1,12 +1,13 @@
 {
   "name": "fantasy-draft-board",
   "version": "1.0.0",
-  "description": "Eigenes Fantasy-Football-Draft-Board mit Offense-Staerke, Strength of Schedule, Verletzungsstatus und Live-Abgleich mit dem ESPN-Draft.",
+  "description": "Fantasy-Football-Draftboard mit Expertenrankings, Tiers, Offense-Projektion aus Wettquoten und Strength of Schedule.",
   "private": true,
   "type": "module",
   "scripts": {
     "test": "node test/run.mjs",
     "serve": "node -e \"import('node:http').then(async({default:h})=>{const{readFile}=await import('node:fs/promises');const{extname,join,normalize}=await import('node:path');const t={'.html':'text/html','.js':'text/javascript','.css':'text/css','.json':'application/json'};h.createServer(async(q,s)=>{const p=join(process.cwd(),normalize(q.url.split('?')[0]).replace(/^(\\.\\.[/\\\\])+/,''));const f=p.endsWith('/')?p+'index.html':p;try{const b=await readFile(f);s.writeHead(200,{'content-type':t[extname(f)]||'application/octet-stream'});s.end(b)}catch{s.writeHead(404);s.end('not found')}}).listen(8080,()=>console.log('http://localhost:8080/'))})\"",
-    "test:e2e": "node test/e2e.mjs"
+    "test:e2e": "node test/e2e.mjs",
+    "build": "node tools/build-data.mjs ../data-sources 2026"
   }
 }

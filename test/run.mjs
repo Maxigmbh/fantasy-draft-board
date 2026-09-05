@@ -1,437 +1,256 @@
 /**
- * Testlauf ohne Netzzugriff: prüft Parser, Bewertungsmodell, Draft-Zustand
- * und den Bookmarklet-Generator gegen synthetische ESPN-Payloads.
+ * Logiktests: pruefen das Datenmodell gegen die echte assets/data/board.json
+ * und die Bausteine der Pipeline. Kein Netzzugriff.
  *
  *   node test/run.mjs
  */
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-// --- Minimale Browser-Umgebung, damit state.js importierbar ist. ------------
-const store = new Map();
-globalThis.localStorage = {
-  getItem: (k) => (store.has(k) ? store.get(k) : null),
-  setItem: (k, v) => store.set(k, String(v)),
-  removeItem: (k) => store.delete(k),
-};
-globalThis.location = {
-  origin: 'https://beispiel.github.io',
-  pathname: '/fahrstuhlsimulator/fantasy-board/',
-  hash: '',
-};
-globalThis.history = { replaceState(_a, _b, hash) { globalThis.location.hash = hash; } };
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const {
-  parseSettings, parsePlayers, parseSchedule, parsePositionalRatings, parseDraft,
-  positionOf, projectedPoints, healthFactor, POSITIONS,
-} = await import('../assets/js/espn.js');
+  rankPlayers, filterPlayers, groupByTier, resolveList, draftValue, DEFAULT_WEIGHTS, POSITIONS,
+} = await import('../assets/js/board.js');
 const {
-  buildBoard, replacementRanks, scheduleStrength, positionalLeagueAverage, DEFAULT_WEIGHTS,
-} = await import('../assets/js/model.js');
-const {
-  DraftState, buildBookmarklet, buildConsoleSnippet, detectEspnPayload, espnDirectUrls,
-} = await import('../assets/js/sync.js');
-const { shareUrl, readHash, exportState, importState } = await import('../assets/js/state.js');
-const fx = await import('./fixtures.mjs');
+  parseCsv, nameKey, fitTeamRatings, expectedPoints, buildPointsCurve, pointsForRank,
+  draftValue: buildDraftValue,
+} = await import('../tools/build-data.mjs');
+
+const data = JSON.parse(readFileSync(join(ROOT, 'assets', 'data', 'board.json'), 'utf8'));
 
 let passed = 0;
 const failures = [];
 function test(name, fn) {
-  try {
-    fn();
-    passed += 1;
-    console.log(`  ok   ${name}`);
-  } catch (err) {
-    failures.push({ name, err });
-    console.log(`  FAIL ${name}\n       ${err.message}`);
+  try { fn(); passed += 1; console.log(`  ok   ${name}`); } catch (err) {
+    failures.push(name);
+    console.log(`  FAIL ${name}\n       ${err.message.split('\n')[0]}`);
   }
 }
 
-const SEASON = fx.SEASON;
-const settings = parseSettings(fx.makeSettingsResponse({ teams: 10 }));
-const players = parsePlayers(fx.makePlayersResponse({ season: SEASON }), SEASON);
-const schedule = parseSchedule(fx.makeScheduleResponse({ season: SEASON }));
-const ratings = parsePositionalRatings(fx.makeRatingsResponse());
+console.log('\nDatendatei');
 
-console.log('\nParser');
-
-test('Liga-Einstellungen werden korrekt gelesen', () => {
-  assert.equal(settings.teams, 10);
-  assert.equal(settings.ppr, 1);
-  assert.deepEqual(settings.starters, { QB: 1, RB: 2, WR: 2, TE: 1, 'D/ST': 1, K: 1, FLEX: 1 });
-  assert.deepEqual(settings.playoffWeeks, [15, 16, 17]);
-  assert.equal(settings.benchSlots, 7);
+test('Grundstruktur ist vollstaendig', () => {
+  assert.ok(data.players.length > 400, `${data.players.length} Spieler`);
+  assert.equal(Object.keys(data.teams).length, 32, '32 NFL-Teams');
+  assert.ok(data.lists.breakouts.length > 0 && data.lists.discount.length > 0);
+  assert.equal(data.meta.rankingBasis, 'dynasty');
+  assert.equal(data.meta.league.teams, 12);
+  assert.match(data.meta.scrapeDate, /^\d{4}-\d{2}-\d{2}$/);
 });
 
-test('Spielerpool: 32 Teams × 18 Spieler, alle Positionen sauber erkannt', () => {
-  assert.equal(players.length, 32 * 18);
-  const counts = {};
-  for (const p of players) counts[p.pos] = (counts[p.pos] || 0) + 1;
-  assert.deepEqual(counts, { QB: 64, RB: 160, WR: 192, TE: 96, K: 32, 'D/ST': 32 });
-  assert.ok(players.every((p) => p.projection > 0), 'jede Projektion > 0');
-  assert.ok(players.every((p) => p.team && p.team !== 'FA'), 'jedes Team aufgelöst');
-  assert.ok(players.every((p) => p.adp > 0), 'ADP vorhanden');
-});
-
-test('Position kommt aus eligibleSlots, nicht aus defaultPositionId', () => {
-  assert.equal(positionOf({ eligibleSlots: [2, 23], defaultPositionId: 99 }), 'RB');
-  assert.equal(positionOf({ eligibleSlots: [4, 23] }), 'WR');
-  assert.equal(positionOf({ eligibleSlots: [6, 23] }), 'TE');
-  assert.equal(positionOf({ eligibleSlots: [0] }), 'QB');
-  assert.equal(positionOf({ eligibleSlots: [16] }), 'D/ST');
-  assert.equal(positionOf({ eligibleSlots: [17] }), 'K');
-  // Ohne eligibleSlots greift der Fallback.
-  assert.equal(positionOf({ defaultPositionId: 3 }), 'WR');
-  assert.equal(positionOf({}), null);
-});
-
-test('Projektion bevorzugt die Saisonprognose, sonst die Vorsaison', () => {
-  const withProj = {
-    stats: [
-      { seasonId: SEASON, statSourceId: 1, statSplitTypeId: 0, appliedTotal: 250 },
-      { seasonId: SEASON - 1, statSourceId: 0, statSplitTypeId: 0, appliedTotal: 100 },
-    ],
-  };
-  assert.equal(projectedPoints(withProj, SEASON), 250);
-  const onlyLastYear = {
-    stats: [{ seasonId: SEASON - 1, statSourceId: 0, statSplitTypeId: 0, appliedTotal: 111 }],
-  };
-  assert.equal(projectedPoints(onlyLastYear, SEASON), 111);
-  assert.equal(projectedPoints({}, SEASON), 0);
-});
-
-test('Spielplan: 32 Teams mit Bye-Week und je 16 Spielen', () => {
-  assert.equal(Object.keys(schedule).length, 32);
-  for (const team of Object.values(schedule)) {
-    assert.ok(team.byeWeek >= 1 && team.byeWeek <= 18, 'Bye-Week gesetzt');
-    const weeks = Object.keys(team.opponents).map(Number);
-    assert.equal(weeks.length, 16, `${team.abbrev}: 17 Wochen minus Bye`);
-    assert.ok(!weeks.includes(team.byeWeek), 'kein Spiel in der Bye-Week');
-    assert.ok(weeks.every((w) => team.opponents[w].opponentId !== team.id), 'kein Spiel gegen sich selbst');
-  }
-});
-
-test('Defense-Ratings werden auf Positionsnamen abgebildet', () => {
-  assert.deepEqual(Object.keys(ratings).sort(), [...POSITIONS].sort());
-  for (const pos of POSITIONS) {
-    assert.equal(Object.keys(ratings[pos]).length, 32, `${pos}: 32 Gegner`);
-  }
-});
-
-test('Draft-Antwort liefert Picks und Teamnamen', () => {
-  const ids = players.slice(0, 30).map((p) => p.id);
-  const draft = parseDraft(fx.makeDraftResponse({ picks: 25, teams: 10, playerIds: ids }));
-  assert.equal(draft.picks.length, 25);
-  assert.equal(draft.inProgress, true);
-  assert.equal(draft.picks[0].overall, 1);
-  assert.equal(draft.picks[10].round, 2);
-  assert.equal(draft.teamNames[3], 'Manager 3');
-});
-
-test('Parser überleben leere und kaputte Antworten', () => {
-  assert.deepEqual(parsePlayers({}, SEASON), []);
-  assert.deepEqual(parsePlayers({ players: [{}, { player: {} }] }, SEASON), []);
-  assert.deepEqual(parseSchedule({}), {});
-  assert.deepEqual(parsePositionalRatings({}), {});
-  assert.deepEqual(parseDraft({}).picks, []);
-  assert.equal(parseSettings({}).teams, 10);
-});
-
-console.log('\nBewertungsmodell');
-
-const board = buildBoard({
-  players, schedule, ratings, teams: 10, starters: settings.starters,
-  weights: { ...DEFAULT_WEIGHTS, playoffWeeks: settings.playoffWeeks },
-});
-
-test('Replacement-Level folgt Ligagröße und Startaufstellung', () => {
-  const ranks = replacementRanks(10, settings.starters);
-  assert.deepEqual(ranks, { QB: 13, RB: 34, WR: 34, TE: 14, K: 10, 'D/ST': 11 });
-  // 12er-Liga braucht mehr Spieler, bevor das Replacement-Level greift.
-  const bigger = replacementRanks(12, settings.starters);
-  for (const pos of POSITIONS) assert.ok(bigger[pos] > ranks[pos], `${pos} skaliert mit der Ligagröße`);
-});
-
-test('Board ist vollständig, absteigend sortiert und durchnummeriert', () => {
-  assert.equal(board.players.length, players.length);
-  for (let i = 1; i < board.players.length; i += 1) {
-    assert.ok(board.players[i - 1].score >= board.players[i].score, 'Score absteigend');
-    assert.equal(board.players[i].rank, i + 1, 'Rang lückenlos');
-  }
-});
-
-test('Positionsränge sind je Position lückenlos und folgen dem Score', () => {
-  for (const pos of POSITIONS) {
-    const list = board.players.filter((p) => p.pos === pos);
-    list.forEach((p, i) => assert.equal(p.posRank, i + 1, `${pos}-Rang ${i + 1}`));
-  }
-});
-
-test('Tiers starten bei 1 und wachsen monoton', () => {
-  for (const pos of POSITIONS) {
-    const list = board.players.filter((p) => p.pos === pos);
-    assert.equal(list[0].tier, 1);
-    for (let i = 1; i < list.length; i += 1) {
-      const step = list[i].tier - list[i - 1].tier;
-      assert.ok(step === 0 || step === 1, `${pos}: Tier springt um ${step}`);
+test('Jeder Spieler traegt die Felder, die die Oberflaeche liest', () => {
+  for (const p of data.players) {
+    for (const f of ['id', 'name', 'pos', 'team', 'ecr', 'offenseIndex', 'sosIndex']) {
+      assert.ok(p[f] !== undefined, `${p.name}: ${f} fehlt`);
     }
-    assert.ok(list.at(-1).tier > 1, `${pos}: mehr als ein Tier`);
+    assert.ok(POSITIONS.includes(p.pos), `${p.name}: Position ${p.pos}`);
+    assert.ok(p.ecr > 0, `${p.name}: ECR ${p.ecr}`);
+    assert.ok(p.offenseIndex >= -1 && p.offenseIndex <= 1, `${p.name}: Offense ausserhalb [-1,1]`);
+    assert.ok(p.sosIndex >= -1 && p.sosIndex <= 1, `${p.name}: SoS ausserhalb [-1,1]`);
+    assert.ok(p.bye >= 0 && p.bye <= 18, `${p.name}: Bye ${p.bye}`);
+  }
+  const ids = new Set(data.players.map((p) => p.id));
+  assert.equal(ids.size, data.players.length, 'IDs sind eindeutig');
+});
+
+test('Jedes Team hat Spielplan, Bye und Ratings', () => {
+  for (const [code, t] of Object.entries(data.teams)) {
+    assert.equal(t.schedule.length, 17, `${code}: 18 Wochen minus Bye`);
+    assert.ok(t.bye >= 1 && t.bye <= 14, `${code}: Bye ${t.bye}`);
+    assert.ok(!t.schedule.some((g) => g.week === t.bye), `${code}: kein Spiel in der Bye-Week`);
+    assert.ok(!t.schedule.some((g) => g.opp === code), `${code}: kein Spiel gegen sich selbst`);
+    assert.ok(Number.isFinite(t.offenseIndex) && Number.isFinite(t.sosIndex));
   }
 });
 
-test('Ohne Gewichte entspricht die Reihenfolge exakt dem VOR', () => {
-  const neutral = buildBoard({
-    players, schedule, ratings, teams: 10, starters: settings.starters,
-    weights: { offense: 0, sos: 0, health: 0, market: 0, playoffBoost: 1 },
-  });
-  const byVor = [...neutral.players].sort((a, b) => b.vor - a.vor || b.projection - a.projection);
-  assert.deepEqual(neutral.players.map((p) => p.id), byVor.map((p) => p.id));
+test('Teams der Spieler existieren im Spielplan', () => {
+  const unknown = data.players
+    .filter((p) => p.team !== 'FA' && !data.teams[p.team])
+    .map((p) => `${p.name} (${p.team})`);
+  assert.deepEqual(unknown, [], `unbekannte Teamkuerzel: ${unknown.join(', ')}`);
 });
 
-test('Verletzung senkt den Score gegenüber sonst identischem Spieler', () => {
-  const base = {
-    id: 1, name: 'Fit', pos: 'RB', teamId: 6, team: 'DAL', eligibleSlots: [2, 23],
-    projection: 220, adp: 10, percentOwned: 90, espnRankPpr: 10, espnRankStd: 10,
-    injuryStatus: 'ACTIVE', injured: false, onTeamId: 0,
-  };
-  const pair = buildBoard({
-    players: [base, { ...base, id: 2, name: 'Out', injuryStatus: 'OUT', injured: true }],
-    schedule, ratings, teams: 10, starters: settings.starters,
-    weights: { ...DEFAULT_WEIGHTS, offense: 0, sos: 0 },
-  });
-  const fit = pair.players.find((p) => p.id === 1);
-  const out = pair.players.find((p) => p.id === 2);
-  assert.ok(fit.score > out.score, 'fitter Spieler steht höher');
-  assert.equal(fit.rank, 1);
-  assert.ok(out.healthMult < 0.7, `Abschlag greift (${out.healthMult.toFixed(2)})`);
-  assert.equal(healthFactor('INJURY_RESERVE'), 0.20);
-  assert.equal(healthFactor(undefined), 1);
-  assert.equal(healthFactor('VOELLIG_UNBEKANNT'), 0.85);
+test('Offense und Spielplan messen nicht dasselbe', () => {
+  const off = Object.values(data.teams).map((t) => t.offenseIndex);
+  const sos = Object.values(data.teams).map((t) => t.sosIndex);
+  const m = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+  const mo = m(off); const ms = m(sos);
+  const cov = off.reduce((a, o, i) => a + (o - mo) * (sos[i] - ms), 0);
+  const so = Math.sqrt(off.reduce((a, o) => a + (o - mo) ** 2, 0));
+  const ss = Math.sqrt(sos.reduce((a, s) => a + (s - ms) ** 2, 0));
+  const r = cov / (so * ss);
+  // Die erste Fassung nutzte fuer beide dieselbe Groesse; r lag bei +1.
+  assert.ok(Math.abs(r) < 0.6, `Korrelation ${r.toFixed(2)} zu hoch — Doppelzaehlung`);
 });
 
-test('Strength of Schedule bleibt im definierten Wertebereich', () => {
-  const leagueAvg = positionalLeagueAverage(ratings);
-  let counted = 0;
-  for (const p of board.players) {
-    const sos = scheduleStrength(p, {
-      schedule, ratings, leagueAvg, playoffWeeks: [15, 16, 17], playoffBoost: 2,
+console.log('\nBewertung');
+
+const ranked = rankPlayers(data.players, DEFAULT_WEIGHTS, 12);
+
+test('Board ist durchnummeriert und absteigend sortiert', () => {
+  assert.equal(ranked.length, data.players.length);
+  ranked.forEach((p, i) => {
+    assert.equal(p.rank, i + 1);
+    if (i) assert.ok(ranked[i - 1].score >= p.score, `Score faellt bei Rang ${i + 1}`);
+  });
+});
+
+test('Ohne Gewichte steht exakt die Expertenrangliste', () => {
+  const neutral = rankPlayers(data.players, { offense: 0, sos: 0 }, 12);
+  const byEcr = [...data.players].sort((a, b) => a.ecr - b.ecr).map((p) => p.id);
+  assert.deepEqual(neutral.map((p) => p.id), byEcr);
+  assert.ok(neutral.every((p) => p.adjust === 1), 'keine Anpassung');
+});
+
+test('Gewichte verschieben das Board, aber begrenzt', () => {
+  const strong = rankPlayers(data.players, { offense: 0.4, sos: 0.4 }, 12);
+  const moved = strong.filter((p, i) => ranked[i].id !== p.id).length;
+  assert.ok(moved > 40, `spuerbare Verschiebung (${moved})`);
+  assert.ok(strong.every((p) => p.adjust >= 0.7 && p.adjust <= 1.3), 'Anpassung gedeckelt');
+  const before = new Map(ranked.map((p) => [p.id, p.rank]));
+  const jump = Math.max(...strong.map((p) => Math.abs(before.get(p.id) - p.rank)));
+  assert.ok(jump < data.players.length / 3, `groesster Sprung ${jump} Plaetze`);
+});
+
+test('Pick-Nummer folgt der Ligagroesse', () => {
+  assert.equal(ranked[0].round, 1);
+  assert.equal(ranked[0].pickInRound, 1);
+  assert.equal(ranked[11].round, 1);
+  assert.equal(ranked[11].pickInRound, 12);
+  assert.equal(ranked[12].round, 2);
+  assert.equal(ranked[12].pickInRound, 1);
+  const ten = rankPlayers(data.players, DEFAULT_WEIGHTS, 10);
+  assert.equal(ten[10].round, 2, 'andere Ligagroesse verschiebt die Runden');
+});
+
+test('Draft-Wert faellt streng monoton', () => {
+  for (let ecr = 1; ecr < 300; ecr += 1) {
+    assert.ok(draftValue(ecr) > draftValue(ecr + 1), `bei ECR ${ecr}`);
+  }
+  assert.equal(draftValue(1), 1);
+  assert.ok(draftValue(1) - draftValue(11) > (draftValue(101) - draftValue(111)) * 3);
+  assert.equal(draftValue(42), buildDraftValue(42), 'Board und Pipeline rechnen gleich');
+});
+
+console.log('\nFilter und Tiers');
+
+test('Positionsfilter und FLEX greifen', () => {
+  const rbs = filterPlayers(ranked, { pos: 'RB' });
+  assert.ok(rbs.length > 50 && rbs.every((p) => p.pos === 'RB'));
+  const flex = filterPlayers(ranked, { pos: 'FLEX' });
+  assert.ok(flex.every((p) => ['RB', 'WR', 'TE'].includes(p.pos)));
+  assert.equal(flex.length, ranked.filter((p) => ['RB', 'WR', 'TE'].includes(p.pos)).length);
+  assert.equal(filterPlayers(ranked, { pos: 'ALLE' }).length, ranked.length);
+});
+
+test('Suche greift auf Name und Team', () => {
+  const name = ranked[0].name.split(' ')[0];
+  assert.ok(filterPlayers(ranked, { search: name }).length >= 1);
+  const { team } = ranked.find((p) => p.team !== 'FA');
+  const byTeam = filterPlayers(ranked, { search: team });
+  assert.ok(byTeam.length > 1);
+  assert.equal(filterPlayers(ranked, { search: 'zzzz-gibt-es-nicht' }).length, 0);
+});
+
+test('Gedraftete lassen sich ausblenden', () => {
+  const drafted = new Set(ranked.slice(0, 5).map((p) => p.id));
+  assert.equal(filterPlayers(ranked, { drafted, hideDrafted: true }).length, ranked.length - 5);
+  assert.equal(filterPlayers(ranked, { drafted, hideDrafted: false }).length, ranked.length);
+});
+
+test('Sortierungen liefern unterschiedliche Reihenfolgen', () => {
+  const first = (sort) => filterPlayers(ranked, { sort })[0].id;
+  const ids = new Set(['score', 'ecr', 'value', 'sos', 'offense', 'prior'].map(first));
+  assert.ok(ids.size >= 4, `Sortierungen unterscheiden sich (${ids.size})`);
+  const byValue = filterPlayers(ranked, { sort: 'value' });
+  assert.ok(byValue[0].value >= byValue[byValue.length - 1].value);
+});
+
+test('Tiers sind luecken- und ueberschneidungsfrei', () => {
+  for (const pos of ['ALLE', 'QB', 'RB', 'WR']) {
+    const list = filterPlayers(ranked, { pos });
+    const groups = groupByTier(list, pos);
+    assert.equal(groups.reduce((a, g) => a + g.players.length, 0), list.length, `${pos}: alle Spieler`);
+    groups.forEach((g, i) => {
+      if (i) assert.ok(g.tier > groups[i - 1].tier, `${pos}: Tier steigt`);
+      assert.ok(g.players.length > 0);
     });
-    assert.ok(sos, `${p.name}: SoS berechenbar`);
-    assert.equal(sos.games, 16, 'alle Spiele der Saison gewertet');
-    assert.ok(sos.z >= -1 && sos.z <= 1, `z in [-1,1], war ${sos.z}`);
-    assert.ok(Number.isFinite(sos.playoffRaw), 'Playoff-Wochen separat ausgewiesen');
-    counted += 1;
+    assert.ok(groups.length >= 3, `${pos}: mehrere Tiers (${groups.length})`);
   }
-  assert.equal(counted, board.players.length);
 });
 
-test('Ein leichterer Spielplan hebt den Score, ein schwerer senkt ihn', () => {
-  const leagueAvg = positionalLeagueAverage(ratings);
-  const withSos = board.players.filter((p) => p.pos === 'WR');
-  const easiest = withSos.reduce((a, b) => (a.sosZ > b.sosZ ? a : b));
-  const hardest = withSos.reduce((a, b) => (a.sosZ < b.sosZ ? a : b));
-  assert.ok(easiest.sosZ > hardest.sosZ, 'Spielpläne unterscheiden sich messbar');
-  assert.ok(easiest.adjust > 1 && hardest.adjust < 1, 'Anpassungsfaktor folgt dem Spielplan');
-  assert.ok(leagueAvg.WR > 0, 'Ligaschnitt vorhanden');
+console.log('\nNebenlisten');
+
+test('Rookie- und Breakout-Liste ist aufloesbar und spaet gehandelt', () => {
+  const list = resolveList(ranked, data.lists.breakouts);
+  assert.equal(list.length, data.lists.breakouts.length, 'alle IDs finden einen Spieler');
+  assert.ok(list.every((p) => p.rank > 12 * 3), 'alle jenseits der dritten Runde');
+  assert.ok(list.some((p) => p.rookie), 'enthaelt Rookies');
 });
 
-test('Höheres SoS-Gewicht verschiebt das Board messbar', () => {
-  const soft = buildBoard({
-    players, schedule, ratings, teams: 10, starters: settings.starters,
-    weights: { ...DEFAULT_WEIGHTS, sos: 0 },
-  });
-  const hard = buildBoard({
-    players, schedule, ratings, teams: 10, starters: settings.starters,
-    weights: { ...DEFAULT_WEIGHTS, sos: 0.4 },
-  });
-  const moved = soft.players.filter((p, i) => hard.players[i].id !== p.id).length;
-  assert.ok(moved > 20, `Reihenfolge ändert sich spürbar (${moved} Positionen)`);
-});
-
-test('Marktabgleich zieht das Board Richtung ESPN-ADP', () => {
-  const pure = buildBoard({
-    players, schedule, ratings, teams: 10, starters: settings.starters,
-    weights: { ...DEFAULT_WEIGHTS, market: 0 },
-  });
-  const market = buildBoard({
-    players, schedule, ratings, teams: 10, starters: settings.starters,
-    weights: { ...DEFAULT_WEIGHTS, market: 0.6 },
-  });
-  const spread = (b) => {
-    const top = b.players.slice(0, 50).map((p) => p.adp);
-    return Math.max(...top) - Math.min(...top);
-  };
-  assert.ok(spread(market) <= spread(pure), 'Top 50 liegen näher an der ADP');
-});
-
-test('Board funktioniert auch ohne Spielplan und ohne Defense-Ratings', () => {
-  const bare = buildBoard({ players, teams: 10, starters: settings.starters });
-  assert.equal(bare.players.length, players.length);
-  assert.ok(bare.players.every((p) => p.sos === null && p.sosZ === 0), 'SoS neutral');
-  assert.ok(bare.players.every((p) => Number.isFinite(p.score)), 'Scores bleiben gültig');
-  assert.equal(bare.meta.hasRatings, false);
-});
-
-test('Offense-Index ist für D/ST neutral und sonst gestreut', () => {
-  const dst = board.players.filter((p) => p.pos === 'D/ST');
-  assert.ok(dst.every((p) => p.offZ === 0), 'D/ST profitiert nicht von der eigenen Offense');
-  const wr = board.players.filter((p) => p.pos === 'WR').map((p) => p.offZ);
-  assert.ok(Math.max(...wr) > 0.2 && Math.min(...wr) < -0.2, 'Offense-Index streut über die Teams');
-});
-
-console.log('\nDraft-Abgleich');
-
-test('ESPN-Picks werden übernommen, manuelle Markierungen bleiben erhalten', () => {
-  const state = new DraftState();
-  const ids = players.slice(0, 40).map((p) => p.id);
-  state.toggleManual(999999, 0);
-  const draft = parseDraft(fx.makeDraftResponse({ picks: 20, teams: 10, playerIds: ids }));
-  assert.equal(state.applyEspnDraft(draft), true);
-  assert.equal(state.count, 21);
-  assert.equal(state.isDrafted(ids[0]), true);
-  assert.equal(state.isDrafted(999999), true, 'manuelle Markierung überlebt');
-  assert.equal(state.pickOf(ids[0]).source, 'espn');
-  assert.equal(state.teamNames[1], 'Manager 1');
-});
-
-test('ESPN-Picks lassen sich nicht manuell überschreiben', () => {
-  const state = new DraftState();
-  const ids = players.slice(0, 10).map((p) => p.id);
-  state.applyEspnDraft(parseDraft(fx.makeDraftResponse({ picks: 5, teams: 10, playerIds: ids })));
-  assert.equal(state.toggleManual(ids[0]), false, 'Rückgabe signalisiert Ablehnung');
-  assert.equal(state.isDrafted(ids[0]), true);
-  assert.equal(state.toggleManual(ids[9]), true, 'freier Spieler ist umschaltbar');
-  assert.equal(state.isDrafted(ids[9]), true);
-  state.toggleManual(ids[9]);
-  assert.equal(state.isDrafted(ids[9]), false, 'zweiter Klick nimmt zurück');
-});
-
-test('Ein neuer Draft-Stand meldet Änderungen und benachrichtigt Zuhörer', () => {
-  const state = new DraftState();
-  let calls = 0;
-  state.onChange(() => { calls += 1; });
-  const ids = players.slice(0, 40).map((p) => p.id);
-  state.applyEspnDraft(parseDraft(fx.makeDraftResponse({ picks: 10, teams: 10, playerIds: ids })));
-  assert.equal(state.applyEspnDraft(parseDraft(fx.makeDraftResponse({ picks: 10, teams: 10, playerIds: ids }))), false,
-    'unveränderter Stand meldet keine Änderung');
-  assert.equal(state.applyEspnDraft(parseDraft(fx.makeDraftResponse({ picks: 15, teams: 10, playerIds: ids }))), true);
-  assert.equal(state.count, 15);
-  assert.equal(calls, 3);
-});
-
-console.log('\nTeilen, Sichern und Bridge');
-
-test('Teilen-Link und Hash-Auswertung sind verlustfrei', () => {
-  const config = {
-    season: 2026, leagueId: '1234567', rankType: 'PPR',
-    weights: { offense: 0.2, sos: 0.25, health: 0.5, playoffBoost: 2.5, market: 0.1 },
-  };
-  const url = shareUrl(config);
-  assert.ok(url.startsWith('https://beispiel.github.io/fahrstuhlsimulator/fantasy-board/#'));
-  globalThis.location.hash = url.slice(url.indexOf('#'));
-  const back = readHash();
-  assert.equal(back.leagueId, '1234567');
-  assert.equal(back.season, 2026);
-  assert.deepEqual(back.weights, config.weights);
-  globalThis.location.hash = '';
-  assert.deepEqual(readHash(), {});
-});
-
-test('Export und Import stellen Konfiguration und Draft-Stand wieder her', () => {
-  const state = new DraftState();
-  state.toggleManual(4242, 3);
-  const config = {
-    season: 2026, leagueId: '77', proxy: 'https://geheim.example/?url=',
-    rankType: 'PPR', myTeamId: 3, hideDrafted: true, onlyHealthy: false,
-    autoSync: true, syncSeconds: 12, weights: { ...DEFAULT_WEIGHTS, sos: 0.31 },
-  };
-  const json = exportState(config, state);
-  assert.ok(!json.includes('geheim.example'), 'Proxy-URL wandert nicht in den Export');
-  const restored = importState(json);
-  assert.equal(restored.config.leagueId, '77');
-  assert.equal(restored.config.weights.sos, 0.31);
-  assert.equal(restored.drafted.get(4242).teamId, 3);
-  assert.throws(() => importState('{"version":99}'), /Unbekanntes Dateiformat/);
-  assert.throws(() => importState('kein json'), /Unbekanntes Dateiformat/);
-});
-
-test('Bookmarklet ist gültig, zielgerichtet und kurz genug', () => {
-  const href = buildBookmarklet({
-    boardUrl: 'https://beispiel.github.io/fahrstuhlsimulator/fantasy-board/#season=2026',
-    season: 2026,
-    intervalMs: 12000,
-  });
-  assert.ok(href.startsWith('javascript:'), 'als Bookmarklet nutzbar');
-  const code = decodeURIComponent(href.slice('javascript:'.length));
-  assert.ok(code.includes("'https://beispiel.github.io'"), 'postMessage nur an die eigene Origin');
-  assert.ok(code.includes('view=mDraftDetail'), 'pollt den Draft');
-  assert.ok(code.includes('view=kona_player_info'), 'holt den Spielerpool');
-  assert.ok(code.includes('view=proTeamSchedules_wl'), 'holt den Spielplan');
-  assert.ok(code.includes('view=mPositionalRatings'), 'holt die Defense-Ratings');
-  assert.ok(code.includes("credentials:'include'"), 'nutzt die ESPN-Anmeldung im ESPN-Tab');
-  assert.ok(code.includes('setInterval(p,12000)'), 'Intervall wird durchgereicht');
-  assert.ok(!code.includes('\n'), 'einzeilig');
-  assert.ok(href.length < 8000, `Bookmarklet-Länge ${href.length} unter dem Browser-Limit`);
-  // Die Bridge darf keine Anmeldedaten weiterreichen.
-  assert.ok(!/espn_s2|SWID|document\.cookie/.test(code), 'keine Cookies im Transfer');
-});
-
-test('ESPN-Antworten werden am Inhalt erkannt', () => {
-  const cases = [
-    ['draft', fx.makeDraftResponse({ picks: 3, teams: 10, playerIds: [1, 2, 3] })],
-    ['ratings', fx.makeRatingsResponse()],
-    ['schedule', fx.makeScheduleResponse({})],
-    ['players', fx.makePlayersResponse({})],
-    ['settings', fx.makeSettingsResponse({})],
-  ];
-  for (const [expected, raw] of cases) {
-    const got = detectEspnPayload(raw, SEASON);
-    assert.ok(got, `${expected}: erkannt`);
-    assert.equal(got.kind, expected);
+test('Versteckte Werte: stark im Vorjahr, abgerutscht in der Redraft-Liste', () => {
+  const list = resolveList(ranked, data.lists.discount);
+  assert.equal(list.length, data.lists.discount.length);
+  for (const p of list) {
+    assert.ok(p.priorPosRank !== null && p.priorPosRank <= 30, `${p.name}: Vorjahresrang`);
+    assert.ok(p.redraftPosRank > p.priorPosRank, `${p.name}: in Redraft abgerutscht`);
+    assert.ok(p.discountGap >= 8, `${p.name}: Abstand ${p.discountGap}`);
+    assert.ok(p.priorPoints > 0, `${p.name}: Vorjahrespunkte`);
+    assert.ok(!['K', 'DST'].includes(p.pos));
   }
-  // Der Spielplan bringt ebenfalls ein settings-Objekt mit — die Reihenfolge
-  // der Pruefungen darf ihn nicht als Einstellungen missdeuten.
-  assert.equal(detectEspnPayload(fx.makeScheduleResponse({}), SEASON).kind, 'schedule');
-  assert.equal(detectEspnPayload({}, SEASON), null);
-  assert.equal(detectEspnPayload(null, SEASON), null);
-  assert.equal(detectEspnPayload('kein objekt', SEASON), null);
 });
 
-test('Erkannte Antworten liefern dieselben Daten wie der direkte Abruf', () => {
-  const viaPaste = detectEspnPayload(fx.makePlayersResponse({}), SEASON).value;
-  assert.deepEqual(viaPaste.map((p) => p.id), players.map((p) => p.id));
-  const draftRaw = fx.makeDraftResponse({ picks: 8, teams: 10, playerIds: players.slice(0, 8).map((p) => p.id) });
-  assert.equal(detectEspnPayload(draftRaw, SEASON).value.picks.length, 8);
+console.log('\nPipeline-Bausteine');
+
+test('CSV-Parser beherrscht Anfuehrungszeichen und Kommas', () => {
+  const rows = parseCsv('a,b,c\n1,"zwei, drei",4\n5,"sechs ""in"" sieben",8\n');
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows[0], { a: '1', b: 'zwei, drei', c: '4' });
+  assert.equal(rows[1].b, 'sechs "in" sieben');
 });
 
-test('Direktadressen zeigen auf die richtigen Views', () => {
-  const urls = espnDirectUrls({ season: 2026, leagueId: '1234567' });
-  const byKey = Object.fromEntries(urls.map((u) => [u.key, u]));
-  assert.ok(byKey.draft.url.includes('/seasons/2026/segments/0/leagues/1234567'));
-  assert.ok(byKey.draft.url.includes('view=mDraftDetail'));
-  assert.equal(byKey.draft.live, true, 'nur der Draft muss wiederholt werden');
-  assert.ok(byKey.schedule.url.includes('view=proTeamSchedules_wl'));
-  assert.ok(!byKey.schedule.url.includes('/leagues/'), 'Spielplan ist ligaunabhaengig');
-  // Defense-Ratings kommen aus der Vorsaison, weil die laufende noch leer ist.
-  assert.ok(byKey.ratings.url.includes('/seasons/2025/'), byKey.ratings.url);
-  assert.equal(urls.filter((u) => u.live).length, 1);
+test('Namensschluessel gleicht Schreibweisen an', () => {
+  assert.equal(nameKey("Ja'Marr Chase"), 'jamarr chase');
+  assert.equal(nameKey('James Cook III'), nameKey('James Cook'));
+  assert.equal(nameKey('Deebo Samuel Sr.'), nameKey('Deebo Samuel'));
+  assert.equal(nameKey('Amon-Ra St. Brown'), 'amon ra st brown');
 });
 
-test('Konsolen-Schnipsel nutzt window.opener und oeffnet kein Fenster', () => {
-  const code = buildConsoleSnippet({
-    boardUrl: 'https://beispiel.github.io/fantasy-draft-board/#season=2026',
-    season: 2026, leagueId: '1234567', intervalMs: 12000,
-  });
-  assert.ok(code.includes('window.opener'), 'nutzt den Verweis auf das Board');
-  assert.ok(!code.includes('window.open('), 'oeffnet kein Pop-up (Safari wuerde blocken)');
-  assert.ok(code.includes('"https://beispiel.github.io"'), 'postMessage nur an die eigene Origin');
-  assert.ok(code.includes('"1234567"'), 'Liga eingesetzt');
-  assert.ok(code.includes('view=mDraftDetail'), 'pollt den Draft');
-  assert.ok(code.includes('view=kona_player_info'), 'holt den Spielerpool');
-  assert.ok(code.includes("credentials: 'include'"), 'nutzt die ESPN-Anmeldung');
-  assert.ok(code.includes('setInterval(poll, 12000)'), 'Intervall eingesetzt');
-  assert.ok(code.includes('clearInterval(window.__fbTimer)'), 'mehrfaches Einfuegen verdoppelt nichts');
-  assert.ok(!/espn_s2|SWID|document\.cookie/.test(code), 'keine Cookies im Transfer');
+test('Team-Ratings finden bekannte Staerken wieder', () => {
+  const trueOff = { A: 4, B: 0, C: -4, D: 1 };
+  const trueDef = { A: -2, B: 2, C: 0, D: 0 };
+  const obs = [];
+  for (const t of Object.keys(trueOff)) {
+    for (const o of Object.keys(trueOff)) {
+      if (t === o) continue;
+      for (const home of [1, 0]) {
+        obs.push({
+          team: t, opponent: o, home, points: 23 + trueOff[t] + trueDef[o] + 1.5 * (home - 0.5),
+        });
+      }
+    }
+  }
+  const fit = fitTeamRatings(obs, { ridge: 0.001, iterations: 500 });
+  const order = (m) => Object.keys(trueOff).sort((a, b) => m.get(b) - m.get(a));
+  assert.deepEqual(order(fit.offense), ['A', 'D', 'B', 'C'], 'Offense-Reihenfolge');
+  assert.ok(fit.offense.get('A') - fit.offense.get('C') > 6, 'Abstand bleibt erhalten');
+  const pred = expectedPoints(fit, 'A', 'B', 1);
+  assert.ok(Math.abs(pred - (23 + 4 + 2 + 0.75)) < 0.6, `Vorhersage ${pred.toFixed(2)}`);
+});
+
+test('Punktekurve faellt und glaettet Ausreisser', () => {
+  const curve = buildPointsCurve([300, 250, 400, 200, 150, 100, 50]);
+  for (let i = 1; i < curve.length; i += 1) {
+    assert.ok(curve[i] <= curve[i - 1] + 1e-9, `Kurve faellt bei ${i}`);
+  }
+  assert.ok(curve[0] < 400, 'Spitzenausreisser wird geglaettet');
+  assert.equal(pointsForRank(curve, 1), curve[0]);
+  assert.equal(pointsForRank(curve, 999), curve[curve.length - 1], 'ausserhalb wird gekappt');
+  assert.equal(pointsForRank([], 3), 0);
 });
 
 console.log(`\n${passed} bestanden, ${failures.length} fehlgeschlagen\n`);

@@ -1,199 +1,144 @@
 # Fantasy Draft Board
 
-Ein eigenes Draft-Board für Fantasy Football nach den Positionen und
-Roster-Regeln einer ESPN-Liga — mit eigener Rangfolge statt der ESPN-ADP und
-mit automatischem Abgleich, welche Spieler im laufenden Draft schon weg sind.
+Ein eigenes Draftboard nach dem Vorbild von FantasyPros: Spieler in Tiers,
+sortier- und filterbar nach Position, mit dem Expertenranking als Spalte —
+ergänzt um zwei Dinge, die dort fehlen: wie stark die Offense des jeweiligen
+Teams projiziert ist und wie der Spielplan über die Saison aussieht.
 
-Die Seite ist statisch. Sie läuft auf GitHub Pages, auf dem iPhone, auf dem Mac
-und lässt sich per Link teilen. Alle Daten werden im Browser des jeweiligen
-Nutzers geholt und verarbeitet — es gibt keinen Server, keine Datenbank und
-keine Konten.
+Dazu zwei Nebenlisten: **Rookies & Breakouts** für die späten Runden und
+**Versteckte Werte** für Spieler, die zuletzt stark produziert haben und
+aktuell auffällig tief gehandelt werden.
+
+Die Seite ist statisch und holt zur Laufzeit nichts nach. Alle Daten stehen in
+`assets/data/board.json`, erzeugt von `tools/build-data.mjs` aus drei offenen
+Quellen.
 
 ---
 
-## Was das Board bewertet
+## Die drei Ansichten
 
-Grundlage ist nicht die rohe Punkteprognose, sondern der **Mehrwert gegenüber
-einem frei verfügbaren Spieler derselben Position** (Value over Replacement).
-Erst dadurch sind QB, RB, WR, TE, K und D/ST überhaupt vergleichbar: Ein QB mit
-340 Projektionspunkten ist wenig wert, wenn der 13. QB noch 300 bringt.
+**Board** — die Gesamtliste, gruppiert in Tiers. Standardmäßig ist nur der
+erste Tier aufgeklappt; jeder weitere öffnet sich per Klick auf die Kopfzeile.
+Die Vorschau rechts zeigt, wer in einem zugeklappten Tier steckt. Positionsfilter
+(inklusive FLEX), Suche und sechs Sortierungen. Ein Klick auf eine Zeile zeigt
+Kennzahlen und den kompletten Wochenspielplan; dort lässt sich ein Spieler auch
+als vergeben markieren.
 
-Das Replacement-Level ergibt sich aus der echten Liga: Teamzahl und
-Startaufstellung kommen aus `mSettings`, der FLEX-Platz wird anteilig auf
-RB/WR/TE umgelegt.
+**Rookies & Breakouts** — Rookies und Spieler ohne nennenswerte Vorsaison, die
+erst ab der vierten Runde gehandelt werden.
 
-Auf diese Basis wirken drei Faktoren:
+**Versteckte Werte** — Spieler, die in der Vorsaison auf ihrer Position weit
+vorne lagen und in der aktuellen **Redraft**-Rangliste deutlich abgerutscht
+sind. Der Vergleich läuft bewusst über die Redraft- und nicht über die
+Dynasty-Liste: dort fällt ein Spieler auch schlicht wegen seines Alters, und das
+wäre ein anderes Signal. Die Spalte *Vorj.* zeigt, was er zuletzt geleistet hat.
 
-| Faktor | Woher | Wirkung |
-| --- | --- | --- |
-| **Offense-Stärke** | Summe der projizierten Punkte der realistischen Fantasy-Starter des NFL-Teams (QB1, RB1–2, WR1–3, TE1), z-standardisiert über alle 32 Teams | Spieler in produktiven Offenses steigen |
-| **Strength of Schedule** | Für jede Woche der Saison: wie viele Fantasy-Punkte lässt der Gegner an genau dieser Position zu (`mPositionalRatings`), verglichen mit dem Ligaschnitt. Die Fantasy-Playoff-Wochen zählen mehrfach | Spieler mit vielen schwachen Gegnern steigen |
-| **Gesundheit** | `injuryStatus` aus der ESPN-API (ACTIVE, QUESTIONABLE, DOUBTFUL, OUT, IR, SUSPENSION, PUP …) | Angeschlagene Spieler fallen; „Nur fit" blendet sie ganz aus |
+## Die Spalten
+
+| Spalte | Bedeutung |
+| --- | --- |
+| **Pick** | Runde und Pick bei 12 Teams — wo dieser Spieler nach eigener Rechnung fällt |
+| **ECR** | Expert Consensus Ranking von FantasyPros, der Marktkonsens |
+| **Off** | Offense-Index des NFL-Teams, aus Wettquoten geschätzt |
+| **SoS** | Spielplan: wie durchlässig die Gegner-Defenses über die Saison sind |
+| **Vorj.** | Fantasy-Punkte der Vorsaison |
+| **Score** | eigene Bewertung, aus ECR plus den beiden Indizes |
+
+Grün und rot markieren Ausschläge über ±15 Punkte. Die Badges am Namen weisen
+Rookies aus sowie Spieler, die deutlich später (**Wert**) oder früher
+(**Reach**) gehandelt werden, als das Board sie sieht.
+
+## Wie gerechnet wird
 
 ```
-Score = 100 · Basis(VOR) · (1 + w_off · Offense + w_sos · Spielplan) · Gesundheitsfaktor
+Score = 100 · Draft-Wert(ECR) · (1 + w_off · Offense + w_sos · Spielplan)
 ```
 
-Multiplikativ, nicht additiv: Spielplan und Offense **verschieben** die
-Talentbewertung, sie ersetzen sie nicht. Ein leichter Spielplan macht aus einem
-WR4 keinen WR1.
+Basis ist das Expertenranking, übersetzt in einen Draft-Wert mit exponentiell
+fallender Kurve: der Abstand zwischen Platz 1 und 10 wiegt weit schwerer als
+der zwischen 100 und 110. Offense und Spielplan verschieben diesen Wert um
+höchstens ±30 %, sie ersetzen ihn nicht. Stehen beide Regler auf 0 %, steht
+exakt die FantasyPros-Rangliste.
 
-Alle Gewichte sind im Board unter **Kriterien** live einstellbar; jede Änderung
-sortiert das Board sofort neu. Der Regler *Marktabgleich* zieht das Ergebnis bei
-Bedarf Richtung ESPN-ADP — bei 0 % ist es eine reine Eigenbewertung.
+Beide Indizes stammen aus den Wettquoten des kompletten Spielplans. Für jedes
+Spiel lässt sich aus Over/Under und Spread die erwartete Punktzahl beider Teams
+zerlegen; daraus schätzt ein Ridge-regularisiertes Modell für jedes Team eine
+Offense- und eine Defense-Stärke. Die Buchmacher stellen nur für die vorderen
+Wochen Linien, das Modell überträgt die Stärken auf die restliche Saison. Auf
+zurückgehaltenen Spielen liegt der mittlere Fehler bei 1.29 Punkten gegenüber
+2.01 ohne Modell.
 
-**Wichtig zur Spielplan-Komponente:** Vor dem ersten Spieltag existieren für die
-laufende Saison noch keine Defense-Werte. Das Board nimmt dann automatisch die
-Vorsaison als Baseline und weist das in der Statusleiste und in der Diagnose
-aus. Das ist die übliche Vorgehensweise vor einem Draft, aber es ist eine
-Annahme über Kaderveränderungen — sie ist keine Prognose der neuen Saison.
+Der Spielplan-Index mittelt ausschließlich die **Gegner**-Defensivstärken,
+Fantasy-Playoff-Wochen doppelt gewichtet. Die eigene Offense bleibt außen vor —
+sie steht schon im Offense-Index, sonst zählt dieselbe Teamstärke zweimal.
 
----
+Tiers entstehen dort, wo der *relative* Abstand zum nächsten Spieler auffällt.
+Absolut gemessen wäre am Anfang der Liste jeder Spieler ein eigener Tier.
 
-## Live-Abgleich mit dem ESPN-Draft
+Details und die Grenzen des Ansatzes: [`tools/README.md`](tools/README.md).
 
-Zwei Wege, weil ESPN keine CORS-Freigabe für fremde Webseiten garantiert:
+## Daten aktualisieren
 
-### A) Direkt (bequem, wenn es funktioniert)
+```bash
+mkdir -p ../data-sources && cd ../data-sources
+git clone --depth 1 https://github.com/dynastyprocess/data dp-data
+git clone --depth 1 https://github.com/nflverse/nfldata    nfldata
+git clone --depth 1 https://github.com/hvpkod/NFL-Data     nfl-stats
+cd - && node tools/build-data.mjs ../data-sources 2026
+```
 
-League-ID eintragen, **Daten laden**. Das Board fragt die ESPN-API selbst ab und
-pollt während des Drafts alle paar Sekunden `mDraftDetail`. Ob der Browser das
-zulässt, hängt davon ab, welche CORS-Header ESPN an die Origin des Boards
-zurückgibt — und das kann ESPN jederzeit ändern.
+DynastyProcess aktualisiert die FantasyPros-Rankings täglich; zum Auffrischen
+genügt danach `git pull` in den drei Ordnern.
 
-### B) Über den ESPN-Tab (der verlässliche Weg)
+## Veröffentlichen
 
-Der Code läuft im ESPN-Tab selbst. Dort sind die Anfragen *gleich-origin*: kein
-CORS, und die Anmeldung an der eigenen (auch privaten) Liga gilt automatisch.
-Die Daten gehen per `postMessage` ans Board. Zwei Varianten.
+GitHub Pages: **Settings → Pages**, Source `Deploy from a branch`, Branch
+`main`, Ordner `/ (root)`. Die Seite liegt dann unter
+`https://<benutzer>.github.io/fantasy-draft-board/`.
 
-**B1 — Konsole (Mac, Safari und Chrome).** Kein Lesezeichen nötig:
-
-1. Safari einmalig vorbereiten: Einstellungen (`⌘,`) → **Erweitert** →
-   *Funktionen für Webentwickler anzeigen*.
-2. Im Board **Setup → Über ESPN-Tab verbinden → ESPN-Tab öffnen**.
-   Wichtig: nur ein so geöffneter Tab kann Daten zurückschicken — das Board ist
-   dort `window.opener`. Ein selbst geöffneter ESPN-Tab funktioniert nicht.
-3. Im ESPN-Tab einloggen, Draft-Raum öffnen, Konsole aufrufen
-   (Safari `⌥⌘C`, Chrome `⌥⌘J`).
-4. Im Board **Befehl kopieren**, in die Konsole einfügen, Return.
-
-Der Schnipsel holt Einstellungen, Spielerpool, Spielplan und Defense-Ratings
-einmalig und danach den Draft-Stand im eingestellten Intervall. Stoppen mit
-`clearInterval(window.__fbTimer)`.
-
-Er öffnet bewusst kein Fenster: ein Aufruf aus der Konsole gilt nicht als
-Nutzergeste, Safari würde das Pop-up blocken.
-
-**B2 — Bookmarklet (iPhone).** Im Board **Adresse kopieren**, dann ein
-beliebiges Lesezeichen anlegen und dessen Adresse durch die kopierte ersetzen.
-Safari lässt sich `javascript:`-Adressen nicht in die Lesezeichenleiste ziehen —
-der Umweg über *Lesezeichen bearbeiten* ist nötig.
-
-Beide Varianten übertragen ausschließlich Spieldaten. Cookies, `espn_s2` und
-`SWID` verlassen den ESPN-Tab nicht; der Empfänger im Board akzeptiert
-Nachrichten nur von ESPN-Origins.
-
-### C) Antwort einfügen (funktioniert immer)
-
-Braucht weder Konsole noch Lesezeichen — nur Kopieren und Einfügen:
-
-1. Im Board **Setup → Über ESPN-Tab verbinden**. Unter Punkt 3 stehen die
-   fertigen ESPN-Adressen für deine Liga.
-2. Adresse anklicken: im eingeloggten Browser antwortet ESPN mit reinem JSON.
-   Das ist eine normale Seitennavigation, also greift kein CORS.
-3. `⌘A`, `⌘C`, zurück ins Board, ins Feld einfügen, **Übernehmen**.
-
-Für den laufenden Draft reicht die erste Adresse (`mDraftDetail`); sie lässt
-sich beliebig oft wiederholen. Das Board erkennt am Inhalt selbst, ob es
-Draft-Picks, Spielerpool, Spielplan, Defense-Ratings oder Einstellungen
-bekommen hat.
-
-Einschränkung: Der **Spielerpool** braucht den Header `X-Fantasy-Filter` und
-lässt sich deshalb nicht über eine blanke Adresse holen — dafür ist Weg A oder B
-nötig. Draft, Spielplan, Ratings und Einstellungen funktionieren so.
-
-### D) Manuell
-
-Jeder Spieler lässt sich in der Detailansicht als gedraftet markieren.
-Picks, die aus ESPN kommen, sind gegen Überschreiben geschützt.
-
-### E) Proxy (Sonderfall)
-
-`proxy/worker.js` ist ein fertiger Cloudflare Worker, der ausschließlich lesende
-ESPN-Endpunkte durchreicht. Nur nötig, wenn A scheitert und weder B noch C in
-Frage kommen. Anleitung steht in der Datei.
-
----
-
-## Veröffentlichen und teilen
-
-GitHub Pages, einmalig:
-
-1. Repository → **Settings → Pages**
-2. *Source*: `Deploy from a branch`, Branch `main`, Ordner `/ (root)`
-3. Speichern. Nach ein paar Minuten liegt das Board unter
-   `https://<benutzer>.github.io/fantasy-draft-board/`
-
-Der Button **Link teilen** erzeugt eine Adresse, die Saison, League-ID und die
-eingestellten Gewichte enthält — wer sie öffnet, sieht dasselbe Board. Der
-eigene Draft-Fortschritt und die Proxy-Einstellung bleiben lokal im Browser.
-
-Auf dem iPhone: Safari → Teilen → *Zum Home-Bildschirm*. Die Seite läuft dann
-wie eine App im Vollbild.
-
-## Lokal ausprobieren
+## Lokal
 
 ```bash
 npm run serve      # http://localhost:8080/
 ```
 
-ES-Module brauchen einen HTTP-Server; ein Doppelklick auf `index.html`
-(`file://`) genügt nicht.
+Ein Doppelklick auf `index.html` genügt nicht — ES-Module und `fetch` brauchen
+einen HTTP-Server.
 
 ## Tests
 
 ```bash
-npm test                                       # Logik
+npm test                                       # Logik gegen die echte Datendatei
 npm i -D playwright && npx playwright install chromium
-npm run test:e2e                               # Oberflaeche im Browser
+npm run test:e2e                               # Oberflaeche in Chromium
 ```
 
-`npm test` prüft Parser, Bewertungsmodell, Draft-Zustand, Teilen-Link und den
-Bookmarklet-Generator. `npm run test:e2e` startet die Seite in Chromium, fängt
-alle ESPN-Aufrufe ab und prüft Laden, Filter, Sortierung, Detailansicht,
-Draft-Sync, Kader und Layout.
-
-Beide Läufe arbeiten mit synthetischen Antworten im ESPN-Schema und gehen nicht
-ins Netz. Die Testdaten bilden das dokumentierte Schema nach; sie ersetzen
-keinen Lauf gegen die echte API.
+`npm test` prüft Struktur und Integrität der Datendatei, die Bewertung, Filter,
+Tiers, beide Nebenlisten und die Bausteine der Pipeline — unter anderem, dass
+das Team-Rating-Modell bekannte Stärken aus synthetischen Daten wiederfindet.
+`npm run test:e2e` fährt die Seite in Chromium hoch und prüft Aufklappen,
+Filter, Sortierung, Regler, Detailansicht und beide Nebenlisten.
 
 ## Aufbau
 
 ```
 .
 ├── index.html            Oberfläche
-├── assets/app.css        Darstellung (Dark/Light, mobil zuerst)
-├── assets/js/espn.js     ESPN-API-Client und Parser
-├── assets/js/model.js    Bewertungsmodell (VOR, Offense, SoS, Gesundheit)
-├── assets/js/sync.js     Draft-Abgleich: Polling, Bridge, Bookmarklet
-├── assets/js/state.js    Konfiguration, localStorage, Teilen-Link
-├── assets/js/ui.js       Rendering
-├── assets/js/main.js     Verdrahtung
-├── proxy/worker.js       Optionaler CORS-Proxy
-├── test/run.mjs          Logiktests
-├── test/e2e.mjs          Browsertest der Oberflaeche
-└── test/fixtures.mjs     Synthetische ESPN-Antworten
+├── assets/app.css        Darstellung (Dark/Light, für breite Bildschirme)
+├── assets/js/board.js    Datenmodell: Bewertung, Filter, Tiers
+├── assets/js/main.js     Oberfläche und Ereignisse
+├── assets/data/board.json  erzeugte Datendatei
+├── tools/build-data.mjs  Pipeline
+└── test/                 Logik- und Browsertests
 ```
 
 ## Grenzen
 
-- Die ESPN-Fantasy-API ist **nicht offiziell dokumentiert**. Feldnamen und
-  Endpunkte können sich ohne Ankündigung ändern. Die Parser sind defensiv
-  geschrieben und liefern im Zweifel leere Ergebnisse statt Abstürzen; das
-  Panel **Diagnose & Datenquellen** zeigt für jede Anfrage, ob sie geklappt hat.
-- Für private Ligen funktionieren die Wege B und C, weil beide die Anmeldung
-  im ESPN-Tab bzw. im Browser nutzen. Weg A braucht dafür einen Proxy mit
-  hinterlegtem Cookie.
-- Projektionen stammen von ESPN. Das Board gewichtet sie neu, es erstellt keine
-  eigenen Prognosen.
+- Offense- und Spielplan-Index sind Team-Werte: alle Spieler eines Teams
+  verschieben sich gemeinsam.
+- Quoten liegen nur für die vorderen Wochen vor; spätere Werte sind
+  Modellschätzungen, keine Marktpreise.
+- Es gibt keinen Verletzungs-Feed. Aktuelle Ausfälle stecken indirekt in der
+  Redraft-Rangliste und damit in der Liste der versteckten Werte.
+- Die Rankings stammen von FantasyPros und sind deren Werk; die Seite bündelt
+  sie nur mit eigenen Kennzahlen und weist die Quelle aus.

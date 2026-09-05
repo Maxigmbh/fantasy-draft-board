@@ -1,622 +1,404 @@
 /**
- * main.js — Verdrahtung: Konfiguration, Datenbeschaffung, Board-Neuberechnung,
- * Draft-Sync und Rendering.
+ * main.js — Oberflaeche des Draftboards.
+ *
+ * Die Seite liest ausschliesslich assets/data/board.json. Es gibt keinen
+ * Netzzugriff zur Laufzeit; die Datei entsteht offline (siehe tools/).
  */
 
-import { EspnClient, POSITIONS, healthFactor } from './espn.js';
-import { buildBoard, DEFAULT_WEIGHTS, DEFAULT_STARTERS, positionalLeagueAverage } from './model.js';
-import { loadConfig, saveConfig, writeHash, shareUrl, exportState, importState } from './state.js';
 import {
-  DraftState, DraftPoller, BridgeReceiver, buildBookmarklet, buildConsoleSnippet,
-  detectEspnPayload, espnDirectUrls,
-} from './sync.js';
-import {
-  renderTabs, renderSliders, renderChips, renderPlayers, renderRoster, renderDiag,
-  formatWeight, SLIDER_DEFS, toast, notice,
-} from './ui.js';
+  POSITIONS, DEFAULT_WEIGHTS, rankPlayers, filterPlayers, groupByTier, resolveList,
+} from './board.js';
 
 const $ = (id) => document.getElementById(id);
-const LIST_STEP = 120;
+const STORAGE = 'draft-board:v2';
+const POS_TABS = ['ALLE', 'QB', 'RB', 'WR', 'TE', 'FLEX', 'K', 'DST'];
+
+const SLIDERS = [
+  {
+    key: 'offense',
+    label: 'Offense-Stärke',
+    min: 0,
+    max: 0.4,
+    step: 0.01,
+    desc: 'Wie stark zählt die erwartete Punktausbeute der eigenen Offense (aus Wettquoten geschätzt)?',
+  },
+  {
+    key: 'sos',
+    label: 'Spielplan',
+    min: 0,
+    max: 0.4,
+    step: 0.01,
+    desc: 'Wie stark zählen durchlässige Gegner-Defenses über die Saison, Playoff-Wochen doppelt?',
+  },
+];
 
 const app = {
-  config: loadConfig(),
-  client: null,
-  draftState: new DraftState(),
-  poller: null,
-  bridge: null,
-  bridgeConnected: false,
-  raw: { players: [], schedule: {}, ratings: {}, settings: null, ratingsSeason: null },
-  board: null,
+  data: null,
+  players: [],
+  view: 'board',
   filters: { pos: 'ALLE', search: '', sort: 'score' },
-  expandedId: null,
-  limit: LIST_STEP,
-  loading: false,
+  weights: { ...DEFAULT_WEIGHTS },
+  drafted: new Set(),
+  hideDrafted: true,
+  expandAll: false,
+  openTiers: new Set([1]),
+  expanded: null,
 };
 
 /* ------------------------------------------------------------------ */
-/* Board berechnen und zeichnen                                        */
+/* Zustand                                                             */
 /* ------------------------------------------------------------------ */
 
-function rebuild() {
-  if (!app.raw.players.length) { render(); return; }
-  const settings = app.raw.settings;
-  app.board = buildBoard({
-    players: app.raw.players,
-    schedule: app.raw.schedule,
-    ratings: app.raw.ratings,
-    teams: settings?.teams || 10,
-    starters: settings?.starters || DEFAULT_STARTERS,
-    weights: {
-      ...app.config.weights,
-      playoffWeeks: settings?.playoffWeeks?.length ? settings.playoffWeeks : [15, 16, 17],
-    },
+function load() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(STORAGE) || '{}');
+    if (raw.weights) app.weights = { ...DEFAULT_WEIGHTS, ...raw.weights };
+    if (Array.isArray(raw.drafted)) app.drafted = new Set(raw.drafted);
+    if (typeof raw.hideDrafted === 'boolean') app.hideDrafted = raw.hideDrafted;
+  } catch { /* gesperrter Storage: ohne Merken weitermachen */ }
+}
+
+function save() {
+  try {
+    localStorage.setItem(STORAGE, JSON.stringify({
+      weights: app.weights, drafted: [...app.drafted], hideDrafted: app.hideDrafted,
+    }));
+  } catch { /* egal */ }
+}
+
+/* ------------------------------------------------------------------ */
+/* Hilfen                                                              */
+/* ------------------------------------------------------------------ */
+
+const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => (
+  { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+));
+
+/** Nachname fuer die Tier-Vorschau — Zusaetze wie Jr. oder III zaehlen nicht. */
+const SUFFIX = /^(jr|sr|ii|iii|iv|v)\.?$/i;
+function surname(name) {
+  const parts = String(name).split(' ').filter((w) => !SUFFIX.test(w));
+  return parts[parts.length - 1] || name;
+}
+
+const signed = (v, digits = 0) => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(digits)}`;
+
+function toast(message, ms = 2400) {
+  const el = $('toast');
+  el.textContent = message;
+  el.hidden = false;
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => { el.hidden = true; }, ms);
+}
+
+/* ------------------------------------------------------------------ */
+/* Rendern                                                             */
+/* ------------------------------------------------------------------ */
+
+function playerRow(p, { showRank = true } = {}) {
+  const isDrafted = app.drafted.has(p.id);
+  const cls = ['row'];
+  if (isDrafted) cls.push('row--drafted');
+  if (app.expanded === p.id) cls.push('row--open');
+
+  const marks = [];
+  if (p.rookie) marks.push('<span class="badge badge--rookie">Rookie</span>');
+  if (p.team === 'FA') marks.push('<span class="badge badge--warn">ohne Team</span>');
+  if (p.value >= 12) marks.push(`<span class="badge badge--good">Wert ${signed(p.value)}</span>`);
+  else if (p.value <= -12) marks.push(`<span class="badge badge--warn">Reach ${signed(p.value)}</span>`);
+
+  return `
+    <li class="${cls.join(' ')}" data-id="${esc(p.id)}" data-pos="${esc(p.pos)}">
+      <span class="c c--rank">${showRank ? p.rank : ''}</span>
+      <span class="c c--pick">${p.round}.${String(p.pickInRound).padStart(2, '0')}</span>
+      <span class="c c--name">
+        <b>${esc(p.name)}</b>
+        ${marks.join('')}
+      </span>
+      <span class="c c--pos"><i class="pos pos--${esc(p.pos)}">${esc(p.pos)}</i>${p.boardPosRank}</span>
+      <span class="c c--team">${esc(p.team)}</span>
+      <span class="c c--bye">${p.bye || '—'}</span>
+      <span class="c c--num" title="Expert Consensus Ranking von FantasyPros">${p.ecr.toFixed(1)}</span>
+      <span class="c c--num ${p.offenseIndex > 0.15 ? 'up' : p.offenseIndex < -0.15 ? 'down' : ''}">${signed(p.offenseIndex * 100)}</span>
+      <span class="c c--num ${p.sosIndex > 0.15 ? 'up' : p.sosIndex < -0.15 ? 'down' : ''}">${signed(p.sosIndex * 100)}</span>
+      <span class="c c--num">${p.priorPoints ?? '—'}</span>
+      <span class="c c--score">${p.score.toFixed(1)}</span>
+    </li>
+    ${app.expanded === p.id ? detailRow(p) : ''}`;
+}
+
+function detailRow(p) {
+  const team = app.data.teams[p.team];
+  const facts = [
+    ['Experten-Ranking', `${p.ecr.toFixed(1)}${p.best ? ` (best ${p.best}, worst ${p.worst})` : ''}`],
+    ['Uneinigkeit', p.sd ? p.sd.toFixed(2) : '—'],
+    ['Redraft-Ranking', p.ecrRedraft ? p.ecrRedraft.toFixed(1) : '—'],
+    [`Punkte ${app.data.meta.priorSeason}`, p.priorPoints ? `${p.priorPoints} (${p.pos}${p.priorPosRank})` : 'kein Vorjahreswert'],
+    ['Besitzquote', p.owned ? `${Math.round(p.owned)} %` : '—'],
+    ['Erwartete Teampunkte', team ? `${team.impliedSeason} / Spiel` : '—'],
+    ['Anpassung', `${signed((p.adjust - 1) * 100, 1)} %`],
+  ];
+  const weeks = (team?.schedule || []).map((g) => {
+    const d = app.data.teams[g.opp]?.defense ?? 0;
+    const cls = d > 0.5 ? 'week--easy' : d < -0.5 ? 'week--hard' : '';
+    const po = app.data.meta.playoffWeeks.includes(g.week) ? ' week--po' : '';
+    return `<span class="week ${cls}${po}">W${g.week} ${g.home ? 'vs' : '@'} ${esc(g.opp)}</span>`;
+  }).join('');
+
+  return `
+    <li class="detail">
+      <div class="facts">
+        ${facts.map(([k, v]) => `<div class="fact"><span>${esc(k)}</span><b>${esc(v)}</b></div>`).join('')}
+      </div>
+      ${weeks ? `<div class="weeks">${weeks}${team.bye ? `<span class="week week--bye">W${team.bye} BYE</span>` : ''}</div>
+      <p class="hint">Grün = Gegner lässt überdurchschnittlich viele Punkte zu. Unterstrichen = Fantasy-Playoffs.</p>` : ''}
+      <div class="btnrow">
+        <button class="btn btn--ghost" data-action="draft" data-id="${esc(p.id)}">
+          ${app.drafted.has(p.id) ? 'Wieder verfügbar' : 'Als weg markieren'}
+        </button>
+      </div>
+    </li>`;
+}
+
+const HEAD = `
+  <li class="row row--head">
+    <span class="c c--rank">#</span><span class="c c--pick">Pick</span>
+    <span class="c c--name">Spieler</span><span class="c c--pos">Pos</span>
+    <span class="c c--team">Team</span><span class="c c--bye">Bye</span>
+    <span class="c c--num">ECR</span><span class="c c--num">Off</span>
+    <span class="c c--num">SoS</span><span class="c c--num">Vorj.</span>
+    <span class="c c--score">Score</span>
+  </li>`;
+
+function renderBoard() {
+  const list = filterPlayers(app.players, {
+    ...app.filters, drafted: app.drafted, hideDrafted: app.hideDrafted,
   });
+  const groups = app.filters.sort === 'score'
+    ? groupByTier(list, app.filters.pos)
+    : [{ tier: null, players: list }];
+
+  $('listMeta').textContent = `${list.length} Spieler · ${app.drafted.size} weg`;
+
+  $('views').innerHTML = groups.map((g) => {
+    if (g.tier === null) {
+      return `<ol class="list">${HEAD}${g.players.map((p) => playerRow(p)).join('')}</ol>`;
+    }
+    const open = app.expandAll || app.openTiers.has(g.tier);
+    const best = g.players[0];
+    const worst = g.players[g.players.length - 1];
+    return `
+      <section class="tier" data-tier="${g.tier}">
+        <button class="tier__head" data-tier="${g.tier}" aria-expanded="${open}">
+          <span class="tier__caret">${open ? '▾' : '▸'}</span>
+          <span class="tier__name">Tier ${g.tier}</span>
+          <span class="tier__meta">${g.players.length} Spieler · Score ${best.score.toFixed(1)}–${worst.score.toFixed(1)}</span>
+          <span class="tier__preview">${g.players.slice(0, 4).map((p) => esc(surname(p.name))).join(' · ')}${g.players.length > 4 ? ' …' : ''}</span>
+        </button>
+        ${open ? `<ol class="list">${HEAD}${g.players.map((p) => playerRow(p)).join('')}</ol>` : ''}
+      </section>`;
+  }).join('') || '<p class="hint pad">Keine Spieler für diesen Filter.</p>';
+}
+
+function renderList(kind) {
+  const ids = app.data.lists[kind] || [];
+  const chosen = resolveList(app.players, ids)
+    .filter((p) => !(app.hideDrafted && app.drafted.has(p.id)));
+  $('listMeta').textContent = `${chosen.length} Spieler`;
+  $('views').innerHTML = chosen.length
+    ? `<ol class="list">${HEAD}${chosen.map((p) => playerRow(p)).join('')}</ol>`
+    : '<p class="hint pad">Nichts übrig — alle bereits markiert.</p>';
+}
+
+const LEADS = {
+  breakouts: 'Rookies und Spieler ohne nennenswerte Vorsaison, die erst ab der vierten Runde '
+    + 'gehandelt werden. Genau dort liegt der Hebel: geringer Einsatz, offenes Ergebnis.',
+  discount: 'Spieler, die in der Vorsaison auf ihrer Position weit vorne lagen und jetzt in der '
+    + 'Redraft-Rangliste deutlich abgerutscht sind. Der Markt preist etwas ein — meist eine '
+    + 'Verletzung, eine Sperre oder einen Rollenwechsel. Die Spalte Vorj. zeigt, was der Spieler '
+    + 'zuletzt geleistet hat.',
+};
+
+function render() {
+  const isBoard = app.view === 'board';
+  $('controls').classList.toggle('controls--slim', !isBoard);
+  $('posTabs').hidden = !isBoard;
+  $('viewLead').hidden = isBoard;
+  if (!isBoard) $('viewLead').textContent = LEADS[app.view];
+
+  if (isBoard) renderBoard(); else renderList(app.view);
+  renderChips();
+}
+
+function renderChips() {
+  const m = app.data.meta;
+  const chips = [
+    { text: `${m.rankingBasis === 'dynasty' ? 'Dynasty' : 'Redraft'} · ${m.league.teams} Teams ${m.league.scoring}` },
+    { text: `Rankings ${m.scrapeDate}`, tone: 'live' },
+    { text: `${app.players.length} Spieler` },
+  ];
+  $('statusChips').innerHTML = chips
+    .map((c) => `<span class="chip ${c.tone ? `chip--${c.tone}` : ''}">${esc(c.text)}</span>`).join('');
+}
+
+function renderSliders() {
+  $('sliders').innerHTML = SLIDERS.map((d) => `
+    <div class="slider">
+      <div class="slider__head">
+        <label for="w_${d.key}">${esc(d.label)}</label>
+        <output id="wv_${d.key}">${Math.round(app.weights[d.key] * 100)} %</output>
+      </div>
+      <input type="range" id="w_${d.key}" data-weight="${d.key}"
+             min="${d.min}" max="${d.max}" step="${d.step}" value="${app.weights[d.key]}">
+      <p class="slider__desc">${esc(d.desc)}</p>
+    </div>`).join('');
+  $('weightsNote').textContent = 'Beide Werte gelten je NFL-Team — alle Spieler eines Teams '
+    + 'verschieben sich gemeinsam. Bei 0 % steht exakt die Expertenrangliste.';
+}
+
+function renderSources() {
+  const m = app.data.meta;
+  const rows = m.sources.map((s) => `<li><a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.name)}</a>${s.date ? ` — Stand ${esc(s.date)}` : ''}</li>`).join('');
+  $('sourcesBox').innerHTML = `
+    <ul class="linklist">${rows}</ul>
+    <p class="hint">
+      Basis ist das Expert Consensus Ranking, übersetzt in einen Draft-Wert mit exponentiell
+      fallender Kurve. Der Offense-Index zerlegt die Wettquoten aller ${m.lineGames} Spiele der
+      Saison in erwartete Punkte je Team; der Spielplan-Index mittelt daraus die Durchlässigkeit
+      der Gegner-Defenses, Fantasy-Playoffs (Woche ${m.playoffWeeks.join(', ')}) doppelt gewichtet.
+    </p>
+    <p class="hint">
+      Grenzen: Quoten liegen nur für die vorderen Wochen vor, spätere Werte sind Modellschätzungen.
+      Einen Verletzungs-Feed gibt es nicht — aktuelle Ausfälle stecken indirekt in der
+      Redraft-Rangliste und damit in der Liste der versteckten Werte.
+    </p>`;
+  $('footNote').textContent = `Erzeugt ${new Date(m.generatedAt).toLocaleString('de-DE')} · `
+    + `Saison ${m.season} · Vorjahreswerte aus ${m.priorSeason}. `
+    + 'Inoffizielles Hilfsmittel, alle Daten aus offenen Quellen.';
+}
+
+/* ------------------------------------------------------------------ */
+/* Ereignisse                                                          */
+/* ------------------------------------------------------------------ */
+
+function recompute() {
+  app.players = rankPlayers(app.data.players, app.weights, app.data.meta.league.teams);
   render();
 }
 
-let rebuildTimer = null;
-function rebuildSoon() {
-  clearTimeout(rebuildTimer);
-  rebuildTimer = setTimeout(rebuild, 120);
-}
-
-function visiblePlayers() {
-  if (!app.board) return [];
-  const { pos, search, sort } = app.filters;
-  const needle = search.trim().toLowerCase();
-
-  let list = app.board.players.filter((p) => {
-    if (pos === 'FLEX') { if (!['RB', 'WR', 'TE'].includes(p.pos)) return false; }
-    else if (pos !== 'ALLE' && p.pos !== pos) return false;
-    if (app.config.hideDrafted && app.draftState.isDrafted(p.id)) return false;
-    if (app.config.onlyHealthy && healthFactor(p.injuryStatus) < 0.93) return false;
-    if (needle && !p.name.toLowerCase().includes(needle) && !p.team.toLowerCase().includes(needle)) return false;
-    return true;
-  });
-
-  const cmp = {
-    score: (a, b) => b.score - a.score,
-    adp: (a, b) => (a.adp || 9999) - (b.adp || 9999),
-    value: (a, b) => (b.adpDelta ?? -9999) - (a.adpDelta ?? -9999),
-    projection: (a, b) => b.projection - a.projection,
-    sos: (a, b) => b.sosZ - a.sosZ,
-  }[sort];
-  list = [...list].sort(cmp);
-  return list;
-}
-
-function render() {
-  renderStatus();
-  if (!app.board) {
-    $('playerList').innerHTML = '<li class="hint" style="padding:24px;text-align:center">Noch keine Daten geladen — oben unter „Setup“ die Liga verbinden.</li>';
-    $('listMeta').textContent = '';
-    $('btnMore').hidden = true;
-    return;
-  }
-
-  const list = visiblePlayers();
-  const shown = list.slice(0, app.limit);
-  renderPlayers($('playerList'), shown, {
-    draftState: app.draftState,
-    myTeamId: Number(app.config.myTeamId) || 0,
-    expandedId: app.expandedId,
-    schedule: app.raw.schedule,
-    ratings: app.raw.ratings,
-    leagueAvg: app.board.meta.leagueAvg,
-    playoffWeeks: app.board.meta.playoffWeeks,
-  });
-
-  $('btnMore').hidden = shown.length >= list.length;
-  $('listMeta').textContent = `${shown.length} von ${list.length} Spielern · ${app.draftState.count} weg`;
-
-  $('myTeamPanel').hidden = !Object.keys(app.draftState.teamNames).length;
-  renderRoster($('myRoster'), app.board, app.draftState, Number(app.config.myTeamId) || 0,
-    app.board.meta.starters);
-  renderDiagnostics();
-}
-
-function renderStatus() {
-  const chips = [];
-  chips.push({ text: `Saison ${app.config.season}` });
-
-  if (app.loading) chips.push({ text: 'lädt …', tone: 'warn' });
-  else if (app.raw.players.length) chips.push({ text: `${app.raw.players.length} Spieler`, tone: 'live' });
-  else chips.push({ text: 'keine Daten', tone: 'warn' });
-
-  if (!Object.keys(app.raw.ratings).length) {
-    chips.push({ text: 'SoS: keine Defense-Daten', tone: 'warn' });
-  } else if (app.raw.ratingsSeason && app.raw.ratingsSeason !== app.config.season) {
-    chips.push({ text: `SoS-Basis ${app.raw.ratingsSeason}` });
-  }
-
-  if (app.bridgeConnected) chips.push({ text: 'ESPN-Tab verbunden', tone: 'live' });
-  if (app.poller?.running) chips.push({ text: 'Draft-Sync aktiv', tone: 'live' });
-
-  if (app.draftState.count) {
-    const time = app.draftState.lastUpdate
-      ? app.draftState.lastUpdate.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-      : '';
-    chips.push({ text: `${app.draftState.count} gedraftet${time ? ` · ${time}` : ''}`, tone: 'live' });
-  }
-  renderChips($('statusChips'), chips);
-}
-
-function renderDiagnostics() {
-  const info = [];
-  const settings = app.raw.settings;
-  info.push(['Liga', app.config.leagueId ? `${settings?.name || 'ID'} ${app.config.leagueId}` : 'nicht gesetzt']);
-  info.push(['Teams', settings?.teams ?? '— (Annahme 10)']);
-  info.push(['Startplätze', JSON.stringify(app.board?.meta.starters ?? DEFAULT_STARTERS)]);
-  info.push(['PPR', settings ? `${settings.ppr} Punkt(e) pro Reception` : '—']);
-  info.push(['Fantasy-Playoffs', (app.board?.meta.playoffWeeks || []).join(', ') || '—']);
-  info.push(['Defense-Ratings', Object.keys(app.raw.ratings).length
-    ? `${Object.keys(app.raw.ratings).join(', ')} (Saison ${app.raw.ratingsSeason})`
-    : 'nicht geladen — SoS wirkt nicht']);
-  info.push(['Spielplan', `${Object.keys(app.raw.schedule).length} NFL-Teams`]);
-  info.push(['Replacement-Level', app.board
-    ? Object.entries(app.board.meta.replacementPoints)
-      .map(([k, v]) => `${k} ${v.toFixed(0)}`).join(' · ')
-    : '—']);
-  info.push(['Bridge', app.bridgeConnected ? 'verbunden' : 'nicht verbunden']);
-
-  for (const entry of (app.client?.log || []).slice(-12)) {
-    info.push([entry.label || 'Request', entry.ok ? `OK (${entry.ms} ms)` : `Fehler: ${entry.error}`]);
-  }
-  renderDiag($('diagBox'), info);
-}
-
-/* ------------------------------------------------------------------ */
-/* Daten laden (direkter Weg)                                          */
-/* ------------------------------------------------------------------ */
-
-function makeClient() {
-  app.client = new EspnClient({
-    season: app.config.season,
-    leagueId: app.config.leagueId,
-    proxy: app.config.proxy,
-  });
-  return app.client;
-}
-
-async function loadData() {
-  app.loading = true;
-  notice($('notice'), '');
-  renderStatus();
-  const client = makeClient();
-
-  try {
-    const players = await client.fetchPlayers({ rankType: app.config.rankType });
-    if (!players.length) throw new Error('ESPN lieferte keinen Spielerpool.');
-    app.raw.players = players;
-  } catch (err) {
-    app.loading = false;
-    render();
-    notice($('notice'),
-      `Spielerpool konnte nicht geladen werden (${err.message}). `
-      + 'Der Browser blockiert vermutlich den direkten Zugriff auf ESPN (CORS). '
-      + 'Nutze „Über ESPN-Tab verbinden“ — das umgeht die Sperre vollständig.',
-      'bad');
-    return;
-  }
-
-  // Spielplan und Defense-Ratings sind optional: ohne sie fehlt nur der SoS-Teil.
-  try {
-    app.raw.schedule = await client.fetchSchedule();
-  } catch {
-    app.raw.schedule = {};
-  }
-  await loadRatings(client);
-
-  if (app.config.leagueId) {
-    try {
-      app.raw.settings = await client.fetchSettings();
-    } catch { /* Liga privat oder CORS — Standardannahmen greifen. */ }
-    startPolling();
-  }
-
-  app.loading = false;
-  rebuild();
-  if (!Object.keys(app.raw.ratings).length) {
-    notice($('notice'),
-      'Defense-Ratings sind nicht verfügbar. Das Board rechnet ohne Spielplan-Komponente weiter — '
-      + 'Offense-Stärke und Gesundheit wirken normal.', '');
-  }
-  toast(`${app.raw.players.length} Spieler geladen`);
-}
-
-/**
- * Defense-Ratings: vor dem ersten Spieltag ist die laufende Saison leer,
- * dann bildet die Vorsaison die Baseline.
- */
-async function loadRatings(client) {
-  for (const season of [app.config.season, app.config.season - 1]) {
-    try {
-      const ratings = await client.fetchPositionalRatings(season);
-      if (Object.keys(ratings).length) {
-        app.raw.ratings = ratings;
-        app.raw.ratingsSeason = season;
-        return;
-      }
-    } catch { /* nächste Saison probieren */ }
-  }
-  app.raw.ratings = {};
-  app.raw.ratingsSeason = null;
-}
-
-/* ------------------------------------------------------------------ */
-/* Draft-Sync                                                          */
-/* ------------------------------------------------------------------ */
-
-function startPolling() {
-  if (!app.config.autoSync || !app.config.leagueId) return;
-  app.poller?.stop();
-  app.poller = new DraftPoller({
-    client: app.client || makeClient(),
-    draftState: app.draftState,
-    intervalMs: Math.max(5, Number(app.config.syncSeconds) || 12) * 1000,
-    onStatus: (status) => {
-      if (status.state === 'error' && status.failures === 1) {
-        notice($('notice'),
-          'Der automatische Draft-Abgleich erreicht ESPN nicht direkt. '
-          + 'Über „Über ESPN-Tab verbinden“ läuft der Abgleich zuverlässig.', 'bad');
-      }
-      if (status.state === 'ok' && status.changed) toast('Draft aktualisiert');
-      renderStatus();
-    },
-  });
-  app.poller.start();
-}
-
-function startBridge() {
-  app.bridge = new BridgeReceiver({
-    season: app.config.season,
-    onStatus: (status) => {
-      if (status.state === 'connected') {
-        app.bridgeConnected = true;
-        notice($('notice'), '');
-        toast('ESPN-Tab verbunden');
-      }
-      renderStatus();
-    },
-    onData: (data) => { applyIncoming(data); rebuildSoon(); },
-  });
-  app.bridge.start();
-}
-
-/**
- * Nimmt eine geparste ESPN-Antwort entgegen — egal ob aus der Bridge oder
- * von Hand eingefügt — und meldet zurück, was damit passiert ist.
- */
-function applyIncoming({ kind, value }) {
-  switch (kind) {
-    case 'players':
-      if (!value.length) return 'Spielerpool war leer';
-      app.raw.players = value;
-      return `${value.length} Spieler übernommen`;
-    case 'schedule':
-      if (!Object.keys(value).length) return 'Spielplan war leer';
-      app.raw.schedule = value;
-      return `Spielplan für ${Object.keys(value).length} Teams übernommen`;
-    case 'ratings':
-      if (!Object.keys(value).length) return 'Defense-Ratings waren leer';
-      app.raw.ratings = value;
-      app.raw.ratingsSeason = app.raw.ratingsSeason ?? app.config.season - 1;
-      return 'Defense-Ratings übernommen';
-    case 'settings':
-      app.raw.settings = value;
-      return `Liga-Einstellungen übernommen (${value.teams} Teams)`;
-    case 'draft': {
-      const changed = app.draftState.applyEspnDraft(value);
-      fillTeamSelect();
-      if (changed) toast('Draft aktualisiert');
-      return `${value.picks.length} Picks übernommen`;
-    }
-    default:
-      return 'Unbekannter Datentyp';
-  }
-}
-
-/** Direkt aufrufbare ESPN-Adressen — im eingeloggten Browser liefern sie JSON. */
-function renderDirectLinks() {
-  const el = $('directLinks');
-  if (!app.config.leagueId) {
-    el.innerHTML = '<li class="hint">League-ID eintragen, dann erscheinen hier die Adressen.</li>';
-    return;
-  }
-  const escape = (value) => String(value).replace(/[&<>"]/g, (c) => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]
-  ));
-  const entries = espnDirectUrls({ season: app.config.season, leagueId: app.config.leagueId });
-  el.innerHTML = entries.map((entry) => {
-    const note = entry.live ? ' — während des Drafts wiederholen' : '';
-    return `<li><a href="${escape(entry.url)}" target="_blank" rel="noopener">`
-      + `${escape(entry.label)}</a>${note}</li>`;
-  }).join('');
-}
-
-function fillTeamSelect() {
-  const select = $('fMyTeam');
-  const names = app.draftState.teamNames;
-  const options = ['<option value="0">— noch nicht gewählt —</option>'];
-  for (const [id, name] of Object.entries(names)) {
-    options.push(`<option value="${id}">${name.replace(/</g, '&lt;')}</option>`);
-  }
-  if (select.options.length !== options.length) select.innerHTML = options.join('');
-  select.value = String(app.config.myTeamId || 0);
-}
-
-/* ------------------------------------------------------------------ */
-/* Formular / Ereignisse                                               */
-/* ------------------------------------------------------------------ */
-
-function fillForm() {
-  $('fSeason').value = app.config.season;
-  $('fLeague').value = app.config.leagueId;
-  $('fRankType').value = app.config.rankType;
-  $('fInterval').value = String(app.config.syncSeconds);
-  $('fProxy').value = app.config.proxy;
-  $('fHideDrafted').checked = app.config.hideDrafted;
-  $('fOnlyHealthy').checked = app.config.onlyHealthy;
-  $('fSort').value = app.filters.sort;
-}
-
-function readForm() {
-  app.config.season = Number($('fSeason').value) || app.config.season;
-  app.config.leagueId = $('fLeague').value.replace(/\D/g, '');
-  app.config.rankType = $('fRankType').value;
-  app.config.syncSeconds = Number($('fInterval').value) || 12;
-  app.config.proxy = $('fProxy').value.trim();
-  persist();
-}
-
-function persist() {
-  saveConfig(app.config);
-  writeHash(app.config);
-}
-
-function togglePanel(panelId, buttonId) {
-  const panel = $(panelId);
-  const button = $(buttonId);
-  panel.hidden = !panel.hidden;
-  button.setAttribute('aria-expanded', String(!panel.hidden));
-}
-
 function wire() {
-  $('toggleSetup').addEventListener('click', () => togglePanel('setupPanel', 'toggleSetup'));
-  $('toggleWeights').addEventListener('click', () => togglePanel('weightsPanel', 'toggleWeights'));
-
-  for (const id of ['fSeason', 'fLeague', 'fRankType', 'fInterval', 'fProxy']) {
-    $(id).addEventListener('change', readForm);
-  }
-
-  $('btnLoad').addEventListener('click', () => { readForm(); loadData(); });
-
-  $('btnBridge').addEventListener('click', () => {
-    const box = $('bridgeBox');
-    box.hidden = false;
-    readForm();
-    const href = buildBookmarklet({
-      boardUrl: shareUrl(app.config),
-      season: app.config.season,
-      intervalMs: Math.max(5, app.config.syncSeconds) * 1000,
-    });
-    $('bookmarkletLink').href = href;
-    renderDirectLinks();
-    box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  });
-
-  $('btnOpenEspn').addEventListener('click', () => {
-    readForm();
-    if (!app.config.leagueId) { toast('Erst die League-ID eintragen.'); return; }
-    const url = `https://fantasy.espn.com/football/draft?leagueId=${app.config.leagueId}`
-      + `&seasonId=${app.config.season}`;
-    // Der Verweis auf dieses Fenster (window.opener drueben) ist die Bruecke:
-    // nur ein so geoeffneter Tab kann Daten zurueckschicken.
-    app.espnWindow = window.open(url, 'espnDraftTab');
-    if (!app.espnWindow) toast('Safari hat das Fenster blockiert — Pop-ups für diese Seite erlauben.');
-    else toast('ESPN-Tab geöffnet. Dort einloggen, dann den Befehl einfügen.');
-  });
-
-  $('btnCopyConsole').addEventListener('click', async () => {
-    readForm();
-    if (!app.config.leagueId) { toast('Erst die League-ID eintragen.'); return; }
-    const snippet = buildConsoleSnippet({
-      boardUrl: shareUrl(app.config),
-      season: app.config.season,
-      leagueId: app.config.leagueId,
-      intervalMs: Math.max(5, app.config.syncSeconds) * 1000,
-    });
-    try {
-      await navigator.clipboard.writeText(snippet);
-      toast('Befehl kopiert — im ESPN-Tab in die Konsole einfügen');
-    } catch {
-      $('pasteBox').value = snippet;
-      toast('Kopieren blockiert — Befehl steht jetzt im Textfeld unten');
+  $('viewTabs').addEventListener('click', (e) => {
+    const btn = e.target.closest('.view');
+    if (!btn) return;
+    app.view = btn.dataset.view;
+    app.expanded = null;
+    for (const b of $('viewTabs').querySelectorAll('.view')) {
+      b.setAttribute('aria-selected', String(b === btn));
     }
-  });
-
-  $('btnApplyPaste').addEventListener('click', () => {
-    const text = $('pasteBox').value.trim();
-    const status = $('pasteStatus');
-    if (!text) { status.textContent = 'Nichts eingefügt.'; return; }
-    let raw;
-    try {
-      raw = JSON.parse(text);
-    } catch {
-      status.textContent = 'Das ist kein gültiges JSON — bitte die komplette Antwort einfügen.';
-      return;
-    }
-    const detected = detectEspnPayload(raw, app.config.season);
-    if (!detected) {
-      status.textContent = 'Antwort nicht erkannt. Erwartet werden Draft, Spielerpool, Spielplan, Ratings oder Einstellungen.';
-      return;
-    }
-    status.textContent = applyIncoming(detected);
-    $('pasteBox').value = '';
-    rebuild();
-  });
-
-  $('bookmarkletLink').addEventListener('click', (e) => {
-    e.preventDefault();
-    toast('Diesen Link in die Lesezeichenleiste ziehen — nicht hier klicken.');
-  });
-
-  $('btnCopyBookmarklet').addEventListener('click', async () => {
-    try {
-      await navigator.clipboard.writeText($('bookmarkletLink').href);
-      toast('Bookmarklet-Adresse kopiert');
-    } catch {
-      toast('Kopieren nicht möglich — Link stattdessen ziehen');
-    }
-  });
-
-  $('btnShare').addEventListener('click', async () => {
-    readForm();
-    const url = shareUrl(app.config);
-    try {
-      if (navigator.share) await navigator.share({ title: 'Fantasy Draft Board', url });
-      else { await navigator.clipboard.writeText(url); toast('Link kopiert'); }
-    } catch { /* Nutzer hat abgebrochen */ }
-  });
-
-  $('btnExport').addEventListener('click', () => {
-    const blob = new Blob([exportState(app.config, app.draftState)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `draft-board-${app.config.season}.json`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-  });
-
-  $('fImport').addEventListener('change', async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      const { config, drafted } = importState(await file.text());
-      app.config = { ...app.config, ...config };
-      app.draftState.restore([...drafted.entries()]);
-      fillForm();
-      renderSliders($('sliders'), app.config.weights);
-      persist();
-      rebuild();
-      toast('Board importiert');
-    } catch (err) {
-      toast(`Import fehlgeschlagen: ${err.message}`);
-    }
-    e.target.value = '';
+    render();
   });
 
   $('posTabs').addEventListener('click', (e) => {
     const btn = e.target.closest('.tab');
     if (!btn) return;
     app.filters.pos = btn.dataset.pos;
-    app.limit = LIST_STEP;
-    renderTabs($('posTabs'), app.filters.pos);
+    app.openTiers = new Set([1]);
+    renderPosTabs();
     render();
   });
 
   $('fSearch').addEventListener('input', (e) => {
     app.filters.search = e.target.value;
-    app.limit = LIST_STEP;
     render();
   });
-
   $('fSort').addEventListener('change', (e) => { app.filters.sort = e.target.value; render(); });
-
   $('fHideDrafted').addEventListener('change', (e) => {
-    app.config.hideDrafted = e.target.checked; persist(); render();
+    app.hideDrafted = e.target.checked; save(); render();
   });
-  $('fOnlyHealthy').addEventListener('change', (e) => {
-    app.config.onlyHealthy = e.target.checked; persist(); render();
-  });
+  $('fExpandAll').addEventListener('change', (e) => { app.expandAll = e.target.checked; render(); });
 
-  $('fMyTeam').addEventListener('change', (e) => {
-    app.config.myTeamId = Number(e.target.value) || 0; persist(); render();
+  $('toggleWeights').addEventListener('click', () => {
+    const panel = $('weightsPanel');
+    panel.hidden = !panel.hidden;
+    $('toggleWeights').setAttribute('aria-expanded', String(!panel.hidden));
   });
-
-  $('btnMore').addEventListener('click', () => { app.limit += LIST_STEP; render(); });
 
   $('sliders').addEventListener('input', (e) => {
     const key = e.target.dataset.weight;
     if (!key) return;
-    const value = Number(e.target.value);
-    app.config.weights[key] = value;
-    const def = SLIDER_DEFS.find((d) => d.key === key);
-    $(`wv_${key}`).textContent = formatWeight(def, value);
-    persist();
-    rebuildSoon();
+    app.weights[key] = Number(e.target.value);
+    $(`wv_${key}`).textContent = `${Math.round(app.weights[key] * 100)} %`;
+    save();
+    recompute();
   });
 
   $('btnResetWeights').addEventListener('click', () => {
-    app.config.weights = { ...DEFAULT_WEIGHTS };
-    renderSliders($('sliders'), app.config.weights);
-    persist();
-    rebuild();
+    app.weights = { ...DEFAULT_WEIGHTS };
+    renderSliders();
+    save();
+    recompute();
   });
 
-  // Klick auf eine Zeile: aufklappen. Klick auf den Button darin: Status wechseln.
-  $('playerList').addEventListener('click', (e) => {
-    const action = e.target.closest('[data-action="toggle-drafted"]');
-    if (action) {
-      const id = Number(action.dataset.id);
-      if (!app.draftState.toggleManual(id, Number(app.config.myTeamId) || 0)) {
-        toast('Dieser Pick kommt aus ESPN und lässt sich nicht überschreiben.');
-      }
+  $('btnClearDrafted').addEventListener('click', () => {
+    app.drafted.clear();
+    save();
+    render();
+    toast('Markierungen gelöscht');
+  });
+
+  $('views').addEventListener('click', (e) => {
+    const tierHead = e.target.closest('.tier__head');
+    if (tierHead) {
+      const t = Number(tierHead.dataset.tier);
+      if (app.openTiers.has(t)) app.openTiers.delete(t); else app.openTiers.add(t);
+      render();
+      return;
+    }
+    const draftBtn = e.target.closest('[data-action="draft"]');
+    if (draftBtn) {
+      const { id } = draftBtn.dataset;
+      if (app.drafted.has(id)) app.drafted.delete(id); else app.drafted.add(id);
+      save();
       render();
       return;
     }
     const row = e.target.closest('.row');
-    if (!row) return;
-    const id = Number(row.dataset.id);
-    app.expandedId = app.expandedId === id ? null : id;
+    if (!row || row.classList.contains('row--head')) return;
+    app.expanded = app.expanded === row.dataset.id ? null : row.dataset.id;
     render();
   });
+}
 
-  // Neue Picks muessen die Liste neu zeichnen, nicht nur die Statusleiste:
-  // sonst bleiben gedraftete Spieler bis zur naechsten Interaktion stehen.
-  app.draftState.onChange(() => { fillTeamSelect(); render(); });
-  window.addEventListener('hashchange', () => { app.config = loadConfig(); fillForm(); });
+function renderPosTabs() {
+  $('posTabs').innerHTML = POS_TABS.map((t) => `
+    <button class="tab" role="tab" data-pos="${t}"
+            aria-selected="${t === app.filters.pos}">${t === 'DST' ? 'D/ST' : t}</button>`).join('');
 }
 
 /* ------------------------------------------------------------------ */
 
-/**
- * Die Kopfzeile bricht je nach Displaybreite auf mehrere Zeilen um.
- * Die Steuerleiste muss genau darunter kleben, nicht dahinter verschwinden.
- */
-function trackTopbarHeight() {
-  const bar = document.querySelector('.topbar');
-  if (!bar) return;
-  const apply = () => document.documentElement.style
-    .setProperty('--topbar-h', `${Math.round(bar.getBoundingClientRect().height)}px`);
-  apply();
-  if (typeof ResizeObserver === 'function') new ResizeObserver(apply).observe(bar);
-  window.addEventListener('resize', apply);
-}
-
-function init() {
-  fillForm();
-  trackTopbarHeight();
-  renderTabs($('posTabs'), app.filters.pos);
-  renderSliders($('sliders'), app.config.weights);
-  wire();
-  startBridge();
-  render();
-
-  const hash = new URLSearchParams(location.hash.replace(/^#/, ''));
-  if (hash.get('bridge') === '1') {
-    // Vom Bookmarklet geöffnet: auf die Daten aus dem ESPN-Tab warten.
-    notice($('notice'), 'Warte auf Daten aus dem ESPN-Tab …');
-  } else if (app.config.leagueId) {
-    loadData();
-  } else {
-    $('setupPanel').hidden = false;
-    $('toggleSetup').setAttribute('aria-expanded', 'true');
+async function init() {
+  load();
+  try {
+    const res = await fetch('assets/data/board.json', { cache: 'no-cache' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    app.data = await res.json();
+  } catch (err) {
+    $('views').innerHTML = `<p class="notice notice--bad">Datendatei konnte nicht geladen werden (${esc(err.message)}). `
+      + 'Die Seite braucht einen HTTP-Server — ein Doppelklick auf index.html genügt nicht.</p>';
+    return;
   }
+  $('fHideDrafted').checked = app.hideDrafted;
+  $('fSort').value = app.filters.sort;
+  renderPosTabs();
+  renderSliders();
+  renderSources();
+  wire();
+  recompute();
 }
 
 init();
 
-// Für Tests und manuelle Kontrolle in der Konsole.
+// Fuer Tests und Kontrolle in der Konsole.
 window.__board = app;
-export { app, POSITIONS, positionalLeagueAverage };
+export { app, POSITIONS };

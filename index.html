@@ -4,10 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark light">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="Draft Board">
-<meta name="description" content="Eigenes Fantasy-Football-Draft-Board mit Offense-Stärke, Strength of Schedule, Verletzungsstatus und Live-Abgleich mit dem ESPN-Draft.">
-<title>Fantasy Draft Board</title>
+<meta name="description" content="Fantasy-Football-Draftboard mit Expertenrankings, Tiers, Offense-Projektion und Strength of Schedule.">
+<title>Draft Board</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230d1117'/%3E%3Cpath d='M16 6c4.6 0 8.4 1.6 8.4 2.4v15.2C24.4 24.4 20.6 26 16 26s-8.4-1.6-8.4-2.4V8.4C7.6 7.6 11.4 6 16 6z' fill='%234c8dff'/%3E%3Cpath d='M16 10.5v11M12.5 13h7M12.5 19h7' stroke='%230d1117' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="assets/app.css">
 </head>
@@ -16,197 +14,57 @@
 <header class="topbar">
   <div class="topbar__row">
     <h1 class="brand">Draft&nbsp;Board</h1>
+    <nav class="views" id="viewTabs" role="tablist">
+      <button class="view" role="tab" data-view="board" aria-selected="true">Board</button>
+      <button class="view" role="tab" data-view="breakouts" aria-selected="false">Rookies&nbsp;&amp;&nbsp;Breakouts</button>
+      <button class="view" role="tab" data-view="discount" aria-selected="false">Versteckte&nbsp;Werte</button>
+    </nav>
     <div class="chips" id="statusChips"></div>
-    <div class="topbar__actions">
-      <button class="btn btn--ghost" id="toggleWeights" aria-expanded="false">Kriterien</button>
-      <button class="btn btn--ghost" id="toggleSetup" aria-expanded="false">Setup</button>
-    </div>
+    <button class="btn btn--ghost" id="toggleWeights" aria-expanded="false">Gewichtung</button>
   </div>
 </header>
 
 <main>
-  <!-- ------------------------------------------------------------------ -->
-  <section class="panel" id="setupPanel" hidden>
-    <h2 class="panel__title">Liga verbinden</h2>
-    <div class="grid">
-      <label class="field">
-        <span>Saison</span>
-        <input type="number" id="fSeason" min="2018" max="2100" step="1" inputmode="numeric">
-      </label>
-      <label class="field">
-        <span>ESPN League-ID</span>
-        <input type="text" id="fLeague" inputmode="numeric" placeholder="z. B. 1234567"
-               autocomplete="off" spellcheck="false">
-      </label>
-      <label class="field">
-        <span>Wertung</span>
-        <select id="fRankType">
-          <option value="PPR">PPR</option>
-          <option value="STANDARD">Standard</option>
-        </select>
-      </label>
-      <label class="field">
-        <span>Sync-Intervall</span>
-        <select id="fInterval">
-          <option value="8">8 Sekunden</option>
-          <option value="12">12 Sekunden</option>
-          <option value="20">20 Sekunden</option>
-          <option value="45">45 Sekunden</option>
-        </select>
-      </label>
-    </div>
-
-    <p class="hint">
-      Die League-ID steht in der Adresszeile deiner ESPN-Liga:
-      <code>…/football/league?leagueId=<b>1234567</b></code>
-    </p>
-
-    <div class="btnrow">
-      <button class="btn btn--primary" id="btnLoad">Daten laden</button>
-      <button class="btn" id="btnBridge">Über ESPN-Tab verbinden</button>
-      <button class="btn btn--ghost" id="btnShare">Link teilen</button>
-      <button class="btn btn--ghost" id="btnExport">Exportieren</button>
-      <label class="btn btn--ghost file">
-        Importieren<input type="file" id="fImport" accept="application/json" hidden>
-      </label>
-    </div>
-
-    <details class="advanced">
-      <summary>Erweitert: CORS-Proxy</summary>
-      <p class="hint">
-        Nur nötig, wenn der direkte Abruf am Browser scheitert und du das
-        Bookmarklet nicht nutzen willst. Die Ziel-URL wird angehängt bzw. für
-        <code>{url}</code> eingesetzt.
-      </p>
-      <label class="field">
-        <span>Proxy-Basis-URL</span>
-        <input type="url" id="fProxy" placeholder="https://mein-worker.workers.dev/?url=" spellcheck="false">
-      </label>
-    </details>
-
-    <div id="bridgeBox" class="bridgebox" hidden>
-      <h3>ESPN-Daten holen</h3>
-      <p class="hint">
-        Drei Wege — der erste ist auf dem Mac der zuverlässigste, der dritte
-        funktioniert immer und braucht nichts weiter als Kopieren und Einfügen.
-      </p>
-
-      <h4 class="bridgebox__step">1 · Konsole im ESPN-Tab <span class="badge badge--good">Mac / Safari</span></h4>
-      <ol class="steps">
-        <li>Unten auf <b>ESPN-Tab öffnen</b> klicken. Wichtig: nur dieser Tab ist
-            mit dem Board verbunden — ein selbst geöffneter Tab funktioniert nicht.</li>
-        <li>Dort einloggen und den Draft-Raum öffnen.</li>
-        <li>Konsole öffnen: Safari <code>⌥⌘C</code>, Chrome <code>⌥⌘J</code>.
-            Falls das Menü fehlt: Safari → Einstellungen → Erweitert →
-            „Funktionen für Webentwickler anzeigen“.</li>
-        <li><b>Befehl kopieren</b>, in die Konsole einfügen, Return.</li>
-      </ol>
-      <p class="btnrow">
-        <button class="btn btn--primary" id="btnOpenEspn">ESPN-Tab öffnen</button>
-        <button class="btn" id="btnCopyConsole">Befehl kopieren</button>
-      </p>
-
-      <h4 class="bridgebox__step">2 · Bookmarklet <span class="badge">iPhone</span></h4>
-      <p class="hint">
-        Adresse kopieren, ein beliebiges Lesezeichen anlegen und dessen Adresse
-        durch die kopierte ersetzen. Danach im ESPN-Tab aufrufen.
-      </p>
-      <p class="btnrow">
-        <a class="btn btn--ghost" id="bookmarkletLink" href="#">Fantasy-Bridge</a>
-        <button class="btn btn--ghost" id="btnCopyBookmarklet">Adresse kopieren</button>
-      </p>
-
-      <h4 class="bridgebox__step">3 · Antwort einfügen <span class="badge badge--good">geht immer</span></h4>
-      <ol class="steps">
-        <li>Eine der Adressen unten anklicken — sie öffnet im eingeloggten
-            Browser reines JSON.</li>
-        <li>Dort <code>⌘A</code>, <code>⌘C</code>.</li>
-        <li>Hier einfügen und auf <b>Übernehmen</b> klicken. Für den laufenden
-            Draft reicht die erste Adresse; einfach wiederholen.</li>
-      </ol>
-      <ul class="linklist" id="directLinks"></ul>
-      <label class="field">
-        <span>ESPN-Antwort einfügen</span>
-        <textarea id="pasteBox" rows="4" spellcheck="false"
-                  placeholder='{"draftDetail":{"picks":[…]}}'></textarea>
-      </label>
-      <p class="btnrow">
-        <button class="btn btn--primary" id="btnApplyPaste">Übernehmen</button>
-        <span class="hint" id="pasteStatus"></span>
-      </p>
-
-      <p class="hint">
-        Alles läuft ausschließlich in deinem Browser. Deine ESPN-Cookies
-        verlassen den ESPN-Tab nicht — übertragen werden nur die Spieldaten.
-      </p>
-    </div>
-  </section>
-
-  <!-- ------------------------------------------------------------------ -->
   <section class="panel" id="weightsPanel" hidden>
-    <h2 class="panel__title">Meine Kriterien</h2>
-    <p class="hint">
-      Basis ist der Mehrwert gegenüber einem frei verfügbaren Spieler derselben
-      Position (VOR). Die Regler gewichten, wie stark Offense, Spielplan und
-      Gesundheit diese Basis verschieben. Jede Änderung sortiert das Board sofort neu.
-    </p>
     <div class="sliders" id="sliders"></div>
+    <p class="hint" id="weightsNote"></p>
     <div class="btnrow">
       <button class="btn btn--ghost" id="btnResetWeights">Zurücksetzen</button>
-      <span class="hint" id="weightsSummary"></span>
+      <button class="btn btn--ghost" id="btnClearDrafted">Alle Markierungen löschen</button>
     </div>
   </section>
 
-  <!-- ------------------------------------------------------------------ -->
-  <section class="controls">
+  <section class="controls" id="controls">
     <div class="tabs" id="posTabs" role="tablist"></div>
     <div class="controls__row">
-      <input type="search" id="fSearch" placeholder="Spieler oder Team suchen…"
-             autocomplete="off" spellcheck="false" aria-label="Spieler suchen">
+      <input type="search" id="fSearch" placeholder="Spieler oder Team…" autocomplete="off"
+             spellcheck="false" aria-label="Spieler suchen">
       <select id="fSort" aria-label="Sortierung">
         <option value="score">Mein Score</option>
-        <option value="adp">ESPN-ADP</option>
-        <option value="value">Value vs. ADP</option>
-        <option value="projection">Projektion</option>
+        <option value="ecr">Experten-Ranking</option>
+        <option value="value">Wert gegen Ranking</option>
+        <option value="offense">Offense</option>
         <option value="sos">Spielplan</option>
+        <option value="prior">Vorjahrespunkte</option>
       </select>
-      <label class="switch"><input type="checkbox" id="fHideDrafted"><span>Gedraftete aus</span></label>
-      <label class="switch"><input type="checkbox" id="fOnlyHealthy"><span>Nur fit</span></label>
+      <label class="switch"><input type="checkbox" id="fHideDrafted" checked><span>Weg ausblenden</span></label>
+      <label class="switch"><input type="checkbox" id="fExpandAll"><span>Alles ausklappen</span></label>
+      <span class="spacer"></span>
+      <span class="hint" id="listMeta"></span>
     </div>
   </section>
 
-  <p class="notice" id="notice" hidden></p>
+  <p class="lead" id="viewLead" hidden></p>
+  <div id="views"></div>
 
-  <section class="board">
-    <ol class="list" id="playerList"></ol>
-    <div class="listfoot">
-      <button class="btn btn--ghost" id="btnMore" hidden>Mehr anzeigen</button>
-      <p class="hint" id="listMeta"></p>
-    </div>
-  </section>
-
-  <section class="panel" id="myTeamPanel" hidden>
-    <h2 class="panel__title">Mein Kader</h2>
-    <div class="grid">
-      <label class="field">
-        <span>Mein Team in der Liga</span>
-        <select id="fMyTeam"><option value="0">— noch nicht gewählt —</option></select>
-      </label>
-    </div>
-    <div id="myRoster" class="roster"></div>
-  </section>
-
-  <details class="panel diag">
-    <summary>Diagnose &amp; Datenquellen</summary>
-    <div id="diagBox"></div>
+  <details class="panel sources">
+    <summary>Datenquellen und Methodik</summary>
+    <div id="sourcesBox"></div>
   </details>
 </main>
 
 <footer class="foot">
-  <p>
-    Inoffizielles Hilfsmittel. Die Daten stammen live aus der öffentlichen
-    ESPN-Fantasy-API und werden ausschließlich in deinem Browser verarbeitet.
-  </p>
+  <p id="footNote"></p>
 </footer>
 
 <div class="toast" id="toast" hidden></div>

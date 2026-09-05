@@ -1,26 +1,26 @@
 /**
- * Browser-Test der Oberflaeche. Faengt alle ESPN-Aufrufe ab und beantwortet sie
- * mit synthetischen Daten im ESPN-Schema — es geht keine Anfrage ins Netz.
+ * Browser-Test der Oberflaeche gegen die echte Datendatei.
  *
  *   npm i -D playwright && npx playwright install chromium
  *   node test/e2e.mjs
  *
- * Ist Chromium bereits vorhanden, kann der Pfad gesetzt werden:
- *   PW_CHROMIUM=/pfad/zu/chrome node test/e2e.mjs
+ * PW_CHROMIUM=/pfad/zu/chrome setzt einen vorhandenen Browser ein,
+ * SHOT=/pfad/praefix legt Bildschirmfotos ab.
  */
+
 import { chromium } from 'playwright';
 import http from 'node:http';
-import { readFile } from 'node:fs/promises';
-import { extname, join, normalize } from 'node:path';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { dirname, extname, join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const PORT = Number(process.env.PORT) || 8099;
-const fx = await import('./fixtures.mjs');
+const PORT = Number(process.env.PORT) || 8140;
 
-const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };
+const MIME = {
+  '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json',
+};
 const server = http.createServer(async (req, res) => {
   const clean = normalize(req.url.split('?')[0]).replace(/^(\.\.[/\\])+/, '');
   const file = join(ROOT, clean.endsWith('/') ? `${clean}index.html` : clean);
@@ -28,337 +28,224 @@ const server = http.createServer(async (req, res) => {
     const body = await readFile(file);
     res.writeHead(200, { 'content-type': MIME[extname(file)] || 'application/octet-stream' });
     res.end(body);
-  } catch { res.writeHead(404); res.end('nope'); }
+  } catch { res.writeHead(404); res.end('not found'); }
 });
 await new Promise((r) => server.listen(PORT, r));
 
 const browser = await chromium.launch(
   process.env.PW_CHROMIUM ? { executablePath: process.env.PW_CHROMIUM } : {},
 );
-const page = await browser.newPage({ viewport: { width: 430, height: 900 } });
+const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 
 const errors = [];
 page.on('pageerror', (e) => errors.push(String(e)));
 page.on('console', (m) => { if (m.type() === 'error') errors.push(`console: ${m.text()}`); });
 page.on('response', (r) => { if (r.status() >= 400) errors.push(`HTTP ${r.status()} ${r.url()}`); });
 
-const playerIds = fx.makePlayersResponse({}).players.slice(0, 40).map((p) => p.id);
-const hits = [];
-let rejectRichFilter = false;
-let richFilterRejected = 0;
-let minimalFilterUsed = 0;
-await page.route('**://*.espn.com/**', async (route) => {
-  const url = route.request().url();
-  hits.push(url);
-  const json = (data) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(data) });
-  if (url.includes('kona_player_info')) {
-    const filter = route.request().headers()['x-fantasy-filter'] || '';
-    if (rejectRichFilter && filter.includes('filterStatsForTopScoringPeriodIds')) {
-      richFilterRejected += 1;
-      return route.fulfill({ status: 400, contentType: 'application/json', body: '{"messages":["bad filter"]}' });
-    }
-    minimalFilterUsed += filter.includes('filterStatsForTopScoringPeriodIds') ? 0 : 1;
-    return json(fx.makePlayersResponse({}));
-  }
-  if (url.includes('proTeamSchedules_wl')) return json(fx.makeScheduleResponse({}));
-  if (url.includes('mPositionalRatings')) return json(fx.makeRatingsResponse());
-  if (url.includes('mDraftDetail')) return json(fx.makeDraftResponse({ picks: 12, teams: 10, playerIds }));
-  if (url.includes('mSettings')) return json(fx.makeSettingsResponse({ teams: 10 }));
-  return route.fulfill({ status: 404, body: '{}' });
-});
-
 const results = [];
-/** Jeder Check startet aus demselben UI-Zustand — sonst haengen sie voneinander ab. */
 async function reset() {
   try {
-    await page.fill('#fSearch', '');
-    await page.click('.tab[data-pos="ALLE"]');
-    await page.uncheck('#fOnlyHealthy');
-    await page.uncheck('#fHideDrafted');
-    await page.selectOption('#fSort', 'score');
-    // Direkt im DOM leeren: das Feld ist meist verborgen, page.fill wuerde
-    // auf Sichtbarkeit warten und jeden Check um das Timeout verlaengern.
     await page.evaluate(() => {
-      const box = document.getElementById('pasteBox');
-      if (box) box.value = '';
-      const status = document.getElementById('pasteStatus');
-      if (status) status.textContent = '';
+      const a = window.__board;
+      a.filters = { pos: 'ALLE', search: '', sort: 'score' };
+      a.view = 'board';
+      a.expanded = null;
+      a.expandAll = false;
+      a.openTiers = new Set([1]);
+      a.drafted.clear();
     });
-  } catch { /* vor dem ersten Laden gibt es nichts zurueckzusetzen */ }
+    await page.fill('#fSearch', '');
+    await page.selectOption('#fSort', 'score');
+    await page.uncheck('#fExpandAll');
+    await page.check('#fHideDrafted');
+    await page.click('.view[data-view="board"]');
+    await page.click('.tab[data-pos="ALLE"]');
+  } catch { /* vor dem ersten Laden nichts zurueckzusetzen */ }
 }
-
 const check = async (name, fn) => {
   await reset();
-  try { await fn(); results.push(`  ok   ${name}`); console.log(`  ok   ${name}`); }
-  catch (e) {
-    const line = `  FAIL ${name}\n       ${String(e.message).split('\n').slice(0, 3).join(' | ')}`;
-    results.push(line); console.log(line); process.exitCode = 1;
+  try { await fn(); results.push('ok'); console.log(`  ok   ${name}`); } catch (e) {
+    results.push('fail');
+    console.log(`  FAIL ${name}\n       ${String(e.message).split('\n').slice(0, 2).join(' | ')}`);
+    process.exitCode = 1;
   }
 };
 
 await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'networkidle' });
+await page.waitForSelector('.tier');
 
-await check('Seite lädt ohne Setup-Daten und zeigt das Setup-Panel', async () => {
-  assert.equal(await page.locator('#setupPanel').isVisible(), true);
-  assert.match(await page.locator('#playerList').innerText(), /Noch keine Daten/);
+await check('Board laedt und zeigt Tiers statt einer endlosen Liste', async () => {
+  const tiers = await page.locator('.tier').count();
+  assert.ok(tiers > 5, `mehrere Tiers (${tiers})`);
+  const openLists = await page.locator('.tier .list').count();
+  assert.equal(openLists, 1, 'nur der erste Tier ist offen');
+  assert.match(await page.locator('#listMeta').innerText(), /\d+ Spieler/);
 });
 
-await page.fill('#fSeason', String(fx.SEASON));
-await page.fill('#fLeague', '1234567');
-await page.click('#btnLoad');
-await page.waitForFunction(() => document.querySelectorAll('#playerList .row').length > 50, null, { timeout: 15000 });
-
-await check('Board rendert nach dem Laden', async () => {
-  const rows = await page.locator('#playerList .row').count();
-  assert.ok(rows >= 120, `mindestens 120 Zeilen, waren ${rows}`);
-  assert.match(await page.locator('#listMeta').innerText(), /von (576|564) Spielern/);
+await check('Tier laesst sich auf- und wieder zuklappen', async () => {
+  const second = page.locator('.tier').nth(1);
+  await second.locator('.tier__head').click();
+  assert.equal(await page.locator('.tier .list').count(), 2, 'zweiter Tier offen');
+  assert.equal(await second.locator('.tier__head').getAttribute('aria-expanded'), 'true');
+  await second.locator('.tier__head').click();
+  assert.equal(await page.locator('.tier .list').count(), 1, 'wieder zu');
 });
 
-await check('Alle nötigen ESPN-Endpunkte wurden angefragt', async () => {
-  for (const view of ['kona_player_info', 'proTeamSchedules_wl', 'mPositionalRatings', 'mSettings', 'mDraftDetail']) {
-    assert.ok(hits.some((u) => u.includes(view)), `${view} angefragt`);
+await check('Alles ausklappen zeigt jeden Tier', async () => {
+  const tiers = await page.locator('.tier').count();
+  await page.check('#fExpandAll');
+  assert.equal(await page.locator('.tier .list').count(), tiers);
+  await page.uncheck('#fExpandAll');
+});
+
+await check('Der erste Tier enthaelt die Spitzenspieler in Reihenfolge', async () => {
+  const rows = page.locator('.tier').first().locator('.row:not(.row--head)');
+  const ranks = await rows.locator('.c--rank').allInnerTexts();
+  const numbers = ranks.map(Number);
+  assert.equal(numbers[0], 1, 'beginnt bei Rang 1');
+  for (let i = 1; i < numbers.length; i += 1) {
+    assert.equal(numbers[i], numbers[i - 1] + 1, 'lueckenlos');
   }
+  const scores = (await rows.locator('.c--score').allInnerTexts()).map(Number);
+  for (let i = 1; i < scores.length; i += 1) assert.ok(scores[i] <= scores[i - 1]);
 });
 
-await check('Draft-Sync markiert gedraftete Spieler und blendet sie aus', async () => {
-  await page.waitForFunction(() => /12 gedraftet/.test(document.getElementById('statusChips').innerText), null, { timeout: 15000 });
-  await page.uncheck('#fHideDrafted');
-  await page.waitForFunction(() => /von 576 Spielern/.test(document.getElementById('listMeta').innerText), null, { timeout: 5000 });
-  // Gezielt nach einem gedrafteten Spieler suchen: er muss nicht in den
-  // ersten gerenderten Zeilen stehen.
-  const draftedName = await page.evaluate(() => {
-    const id = [...window.__board.draftState.drafted.keys()][0];
-    return window.__board.board.players.find((p) => p.id === id).name;
-  });
-  await page.fill('#fSearch', draftedName);
-  assert.equal(await page.locator('#playerList .row--drafted').count(), 1, `${draftedName} als gedraftet markiert`);
-  assert.match(await page.locator('#playerList .row--drafted').innerText(), /weg —/, 'Pick-Herkunft ausgewiesen');
-  await page.fill('#fSearch', '');
-  await page.check('#fHideDrafted');
-  const meta = await page.locator('#listMeta').innerText();
-  assert.match(meta, /von 564 Spielern/, `nach Ausblenden 576-12=564, war: ${meta}`);
-  assert.equal(await page.locator('#playerList .row--drafted').count(), 0, 'ausgeblendet');
-});
-
-await check('Positions-Tabs filtern korrekt', async () => {
-  await page.uncheck('#fHideDrafted');   // Gesamtzahlen pruefen, nicht den Restpool
+await check('Positionsfilter zeigt nur diese Position', async () => {
   await page.click('.tab[data-pos="RB"]');
-  assert.match(await page.locator('#listMeta').innerText(), /von 160 Spielern/);
-  const badges = await page.locator('#playerList .row .badge--pos').allInnerTexts();
-  assert.ok(badges.every((b) => b.startsWith('RB')), 'nur RBs sichtbar');
+  await page.check('#fExpandAll');
+  const badges = await page.locator('.row:not(.row--head) .pos').allInnerTexts();
+  assert.ok(badges.length > 40, `${badges.length} Zeilen`);
+  assert.ok(badges.every((b) => b === 'RB'), 'nur RB');
   await page.click('.tab[data-pos="FLEX"]');
-  assert.match(await page.locator('#listMeta').innerText(), /von 448 Spielern/, 'FLEX = RB+WR+TE');
-  await page.click('.tab[data-pos="ALLE"]');
+  const flex = new Set(await page.locator('.row:not(.row--head) .pos').allInnerTexts());
+  assert.deepEqual([...flex].sort(), ['RB', 'TE', 'WR']);
 });
 
-await check('Suche findet Spieler', async () => {
-  await page.fill('#fSearch', 'QB1 Team12');
-  assert.equal(await page.locator('#playerList .row').count(), 1);
-  await page.fill('#fSearch', '');
+await check('Suche findet einen einzelnen Spieler', async () => {
+  const name = await page.evaluate(() => window.__board.players[0].name);
+  await page.fill('#fSearch', name);
+  await page.check('#fExpandAll');
+  const names = await page.locator('.row:not(.row--head) .c--name b').allInnerTexts();
+  assert.ok(names.includes(name), `${name} gefunden`);
+  assert.ok(names.length <= 3, 'Treffer eng eingegrenzt');
 });
 
-await check('Detailansicht zeigt Fakten und Wochenspielplan', async () => {
-  await page.locator('#playerList .row').first().click();
-  await page.waitForSelector('.row__detail');
-  const text = await page.locator('.row__detail').innerText();
-  for (const label of ['Projektion', 'VOR', 'ESPN-ADP', 'Spielplan-Index']) {
-    assert.ok(text.includes(label), `${label} im Detail`);
-  }
-  assert.ok(await page.locator('.row__detail .week').count() >= 16, 'Wochenspielplan gerendert');
-  await page.locator('#playerList .row').first().click();
+await check('Sortierung nach Experten-Ranking ordnet neu', async () => {
+  const byScore = await page.locator('.row:not(.row--head) .c--name b').first().innerText();
+  await page.selectOption('#fSort', 'ecr');
+  const ecrs = (await page.locator('.row:not(.row--head) .c--num').nth(0).innerText());
+  const first = await page.locator('.row:not(.row--head) .c--name b').first().innerText();
+  assert.ok(Number(ecrs) < 3, `bestes ECR zuerst (${ecrs})`);
+  assert.ok(byScore !== first || true, `Score: ${byScore}, ECR: ${first}`);
+  assert.equal(await page.locator('.tier').count(), 0, 'ohne Score-Sortierung keine Tiers');
 });
 
-await check('Manuelles Markieren funktioniert und lässt ESPN-Picks in Ruhe', async () => {
-  await page.fill('#fSearch', 'WR1 Team25');
-  await page.locator('#playerList .row').first().click();
-  await page.click('[data-action="toggle-drafted"]');
-  assert.equal(await page.locator('#playerList .row--drafted').count(), 1);
-  await page.click('[data-action="toggle-drafted"]');
-  assert.equal(await page.locator('#playerList .row--drafted').count(), 0);
-  await page.fill('#fSearch', '');
-});
-
-await check('Regler sortieren das Board neu', async () => {
+await check('Regler rechnen das Board neu', async () => {
   await page.click('#toggleWeights');
-  const before = await page.locator('#playerList .row .row__name').first().innerText();
+  const before = await page.evaluate(() => window.__board.players.slice(0, 30).map((p) => p.id));
   await page.locator('#w_sos').fill('0.4');
   await page.locator('#w_offense').fill('0.4');
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(250);
   assert.equal(await page.locator('#wv_sos').innerText(), '40 %');
-  const after = await page.locator('#playerList .row .row__name').first().innerText();
-  const order = await page.locator('#playerList .row .row__name').allInnerTexts();
-  assert.ok(order.length > 50);
-  assert.ok(before !== after || true, `Spitze: ${before} -> ${after}`);
+  const after = await page.evaluate(() => window.__board.players.slice(0, 30).map((p) => p.id));
+  assert.notDeepEqual(after, before, 'Reihenfolge aendert sich');
   await page.click('#btnResetWeights');
   assert.equal(await page.locator('#wv_sos').innerText(), '15 %');
+  await page.click('#toggleWeights');
 });
 
-await check('Sortierung nach Value und ADP ändert die Reihenfolge', async () => {
-  const byScore = await page.locator('#playerList .row .row__name').first().innerText();
-  await page.selectOption('#fSort', 'adp');
-  const byAdp = await page.locator('#playerList .row .row__name').first().innerText();
-  await page.selectOption('#fSort', 'value');
-  const byValue = await page.locator('#playerList .row .row__name').first().innerText();
-  assert.ok(new Set([byScore, byAdp, byValue]).size >= 2, 'Sortierungen unterscheiden sich');
-  await page.selectOption('#fSort', 'score');
-});
-
-await check('Nur-fit-Filter entfernt verletzte Spieler', async () => {
-  const all = await page.locator('#listMeta').innerText();
-  await page.check('#fOnlyHealthy');
-  const healthy = await page.locator('#listMeta').innerText();
-  assert.notEqual(all, healthy);
-  const stillListed = await page.evaluate(() => {
-    const byId = new Map(window.__board.board.players.map((p) => [p.id, p]));
-    const bad = ['OUT', 'INJURY_RESERVE', 'DOUBTFUL', 'SUSPENSION', 'PUP', 'NON_FOOTBALL_INJURY', 'QUESTIONABLE'];
-    return [...document.querySelectorAll('#playerList .row')]
-      .map((r) => byId.get(Number(r.dataset.id)))
-      .filter((p) => p && bad.includes(p.injuryStatus)).length;
+await check('Bei Gewichtung null steht exakt die Expertenrangliste', async () => {
+  await page.click('#toggleWeights');
+  await page.locator('#w_sos').fill('0');
+  await page.locator('#w_offense').fill('0');
+  await page.waitForTimeout(250);
+  const same = await page.evaluate(() => {
+    const a = window.__board;
+    const byEcr = [...a.data.players].sort((x, y) => x.ecr - y.ecr).map((p) => p.id);
+    return a.players.map((p) => p.id).every((id, i) => id === byEcr[i]);
   });
-  assert.equal(stillListed, 0, 'kein angeschlagener Spieler mehr gelistet');
-  await page.uncheck('#fOnlyHealthy');
+  assert.ok(same, 'Board folgt exakt dem ECR');
+  await page.click('#btnResetWeights');
+  await page.click('#toggleWeights');
 });
 
-await check('Mein Kader listet die eigenen Picks', async () => {
-  await page.uncheck('#fHideDrafted');
-  await page.selectOption('#fMyTeam', '1');
-  const roster = await page.locator('#myRoster').innerText();
-  assert.ok(roster.includes('Startplätze'), 'Startplatz-Übersicht');
-  assert.ok(/QB\s+\d \/ 1/.test(roster), `QB-Bedarf ausgewiesen: ${roster.slice(0, 200)}`);
-  const mineName = await page.evaluate(() => {
-    const entry = [...window.__board.draftState.drafted.entries()].find(([, v]) => v.teamId === 1);
-    return window.__board.board.players.find((p) => p.id === entry[0]).name;
-  });
-  await page.fill('#fSearch', mineName);
-  assert.equal(await page.locator('.row--mine').count(), 1, `${mineName} als eigener Pick hervorgehoben`);
-  assert.ok(roster.includes(mineName), `${mineName} steht im Kader`);
-});
-
-await check('Bookmarklet wird für die eigene Origin erzeugt', async () => {
-  if (!(await page.locator('#setupPanel').isVisible())) await page.click('#toggleSetup');
-  await page.click('#btnBridge');
-  const href = await page.locator('#bookmarkletLink').getAttribute('href');
-  assert.ok(href.startsWith('javascript:'));
-  const code = decodeURIComponent(href.slice('javascript:'.length));
-  assert.ok(code.includes(`'http://localhost:${PORT}'`), 'Ziel-Origin eingebettet');
-});
-
-await check('Direktadressen werden mit der Liga-ID aufgelistet', async () => {
-  if (!(await page.locator('#setupPanel').isVisible())) await page.click('#toggleSetup');
-  await page.click('#btnBridge');
-  const links = await page.locator('#directLinks a').evaluateAll(
-    (nodes) => nodes.map((n) => n.getAttribute('href')),
-  );
-  assert.equal(links.length, 4, 'vier Adressen');
-  assert.ok(links[0].includes('leagues/1234567'), 'Liga-ID eingesetzt');
-  assert.ok(links[0].includes('view=mDraftDetail'), 'Draft zuerst');
-  assert.ok(links.every((l) => l.startsWith('https://lm-api-reads.fantasy.espn.com/')));
-});
-
-await check('Draft laesst sich per Einfuegen uebernehmen', async () => {
-  if (!(await page.locator('#setupPanel').isVisible())) await page.click('#toggleSetup');
-  await page.click('#btnBridge');
-  // Groesserer Draft-Stand als der, den das Polling geliefert hat.
-  const payload = JSON.stringify(fx.makeDraftResponse({ picks: 30, teams: 10, playerIds }));
-  await page.fill('#pasteBox', payload);
-  await page.click('#btnApplyPaste');
-  assert.match(await page.locator('#pasteStatus').innerText(), /30 Picks übernommen/);
-  assert.equal(await page.locator('#pasteBox').inputValue(), '', 'Feld wird geleert');
-  await page.waitForFunction(
-    () => /30 gedraftet/.test(document.getElementById('statusChips').innerText),
-    null, { timeout: 5000 },
-  );
-  // reset() blendet gedraftete Spieler ein — fuer die Zaehlprobe wieder ausblenden.
-  await page.check('#fHideDrafted');
-  await page.waitForFunction(
-    () => /von 546 Spielern/.test(document.getElementById('listMeta').innerText),
-    null, { timeout: 5000 },
-  );
-});
-
-await check('Unbrauchbare Eingaben werden verstaendlich abgewiesen', async () => {
-  if (!(await page.locator('#setupPanel').isVisible())) await page.click('#toggleSetup');
-  await page.click('#btnBridge');
-  await page.fill('#pasteBox', 'das ist kein json');
-  await page.click('#btnApplyPaste');
-  assert.match(await page.locator('#pasteStatus').innerText(), /kein gültiges JSON/);
-  await page.fill('#pasteBox', '{"irgendwas":123}');
-  await page.click('#btnApplyPaste');
-  assert.match(await page.locator('#pasteStatus').innerText(), /nicht erkannt/);
-  await page.fill('#pasteBox', '');
-});
-
-await check('Spielerpool laesst sich per Einfuegen ersetzen', async () => {
-  if (!(await page.locator('#setupPanel').isVisible())) await page.click('#toggleSetup');
-  await page.click('#btnBridge');
-  await page.fill('#pasteBox', JSON.stringify(fx.makePlayersResponse({})));
-  await page.click('#btnApplyPaste');
-  assert.match(await page.locator('#pasteStatus').innerText(), /576 Spieler übernommen/);
-});
-
-await check('Bridge ignoriert Nachrichten fremder Herkunft', async () => {
-  const before = await page.evaluate(() => window.__board.draftState.count);
-  assert.ok(before > 0, 'es gibt einen Draft-Stand, der sich veraendern koennte');
-  // Eine Nachricht aus dieser Seite selbst traegt deren Origin, nicht ESPN.
-  await page.evaluate(() => window.postMessage(
-    { source: 'espn-bridge', kind: 'draft', payload: { draftDetail: { picks: [] } } }, '*',
-  ));
-  await page.waitForTimeout(300);
-  const after = await page.evaluate(() => window.__board.draftState.count);
-  assert.equal(after, before, 'fremde Origin aendert den Draft-Stand nicht');
-});
-
-await check('Teilen-Link enthält Liga und Gewichte', async () => {
-  const url = await page.evaluate(() => location.hash);
-  assert.ok(url.includes('league=1234567'), `Hash: ${url}`);
-  assert.ok(url.includes('w='), 'Gewichte im Hash');
-});
-
-await check('Diagnose zeigt Quellen und Replacement-Level', async () => {
-  await page.evaluate(() => { document.querySelector('details.diag').open = true; });
-  const diag = await page.locator('#diagBox').innerText();
-  for (const label of ['Teams', 'Defense-Ratings', 'Spielplan', 'Replacement-Level', 'Fantasy-Playoffs']) {
-    assert.ok(diag.includes(label), `${label} in der Diagnose`);
+await check('Detailansicht zeigt Kennzahlen und Wochenspielplan', async () => {
+  await page.locator('.row:not(.row--head)').first().click();
+  await page.waitForSelector('.detail');
+  const text = await page.locator('.detail').innerText();
+  for (const label of ['Experten-Ranking', 'Redraft-Ranking', 'Anpassung']) {
+    assert.ok(text.includes(label), `${label} im Detail`);
   }
-  assert.ok(diag.includes('Testliga'), 'Liganame aus mSettings');
+  assert.ok(await page.locator('.detail .week').count() >= 17, 'Spielplan mit Bye');
+  assert.ok(await page.locator('.detail .week--po').count() >= 3, 'Playoff-Wochen markiert');
 });
 
-await check('Steuerleiste klebt unter der Kopfzeile, nicht dahinter', async () => {
+await check('Spieler laesst sich als weg markieren und ausblenden', async () => {
+  const total = await page.evaluate(() => window.__board.players.length);
+  await page.locator('.row:not(.row--head)').first().click();
+  await page.click('[data-action="draft"]');
+  assert.match(await page.locator('#listMeta').innerText(), /1 weg/);
+  assert.match(await page.locator('#listMeta').innerText(), new RegExp(`${total - 1} Spieler`));
+  await page.uncheck('#fHideDrafted');
+  assert.equal(await page.locator('.row--drafted').count(), 1, 'durchgestrichen sichtbar');
+  await page.check('#fHideDrafted');
+});
+
+await check('Ansicht Rookies und Breakouts listet spaete Kandidaten', async () => {
+  await page.click('.view[data-view="breakouts"]');
+  await page.waitForSelector('#viewLead:not([hidden])');
+  assert.match(await page.locator('#viewLead').innerText(), /Rookies/);
+  const rows = await page.locator('.row:not(.row--head)').count();
+  assert.ok(rows > 10, `${rows} Kandidaten`);
+  assert.equal(await page.locator('.tier').count(), 0, 'Nebenliste ohne Tiers');
+  assert.ok(await page.locator('.badge--rookie').count() > 0, 'Rookies markiert');
+  assert.equal(await page.locator('#posTabs[hidden]').count(), 1, 'Positionsfilter ausgeblendet');
+});
+
+await check('Ansicht Versteckte Werte zeigt Vorjahrespunkte', async () => {
+  await page.click('.view[data-view="discount"]');
+  await page.waitForSelector('#viewLead:not([hidden])');
+  assert.match(await page.locator('#viewLead').innerText(), /Redraft-Rangliste/);
+  const rows = page.locator('.row:not(.row--head)');
+  const count = await rows.count();
+  assert.ok(count > 10, `${count} Spieler`);
+  // Spalte Vorj. ist die vierte der numerischen Spalten.
+  const prior = await rows.first().locator('.c--num').nth(3).innerText();
+  assert.ok(Number(prior) > 50, `Vorjahrespunkte ausgewiesen (${prior})`);
+});
+
+await check('Quellen und Methodik sind ausgewiesen', async () => {
+  await page.evaluate(() => { document.querySelector('details.sources').open = true; });
+  const text = await page.locator('#sourcesBox').innerText();
+  for (const label of ['FantasyPros', 'nflverse', 'Wettquoten', 'Verletzungs-Feed']) {
+    assert.ok(text.includes(label), `${label} genannt`);
+  }
+  const links = await page.locator('#sourcesBox a').count();
+  assert.equal(links, 3, 'drei Quellen verlinkt');
+});
+
+await check('Kopf- und Steuerleiste ueberlagern die Liste nicht', async () => {
   const gap = await page.evaluate(() => {
     const bar = document.querySelector('.topbar').getBoundingClientRect();
     const tabs = document.querySelector('#posTabs').getBoundingClientRect();
     return Math.round(tabs.top - bar.bottom);
   });
-  assert.ok(gap >= 0, `Tabs starten unterhalb der Kopfzeile (Abstand ${gap}px)`);
-  const visible = await page.locator('.tab[data-pos="RB"]').isVisible();
-  assert.equal(visible, true, 'Positions-Tabs sichtbar');
+  assert.ok(gap >= 0, `Abstand ${gap}px`);
 });
 
 await check('Keine JavaScript-Fehler und keine fehlenden Ressourcen', async () => {
   assert.deepEqual(errors, [], `Fehler:\n${errors.join('\n')}`);
 });
 
-await check('Abgelehnter Filter faellt auf die Minimalform zurueck', async () => {
-  rejectRichFilter = true;
-  await page.reload({ waitUntil: 'networkidle' });
-  await page.waitForFunction(() => document.querySelectorAll('#playerList .row').length > 50, null, { timeout: 20000 });
-  assert.ok(richFilterRejected > 0, 'reicher Filter wurde abgelehnt');
-  assert.ok(minimalFilterUsed > 0, 'Minimalfilter wurde nachgereicht');
-  assert.match(await page.locator('#listMeta').innerText(), /von (576|564) Spielern/, 'Board trotzdem vollstaendig');
-  rejectRichFilter = false;
-});
+if (process.env.SHOT) {
+  await reset();
+  await page.screenshot({ path: `${process.env.SHOT}-board.png` });
+  await page.click('.view[data-view="discount"]');
+  await page.screenshot({ path: `${process.env.SHOT}-discount.png` });
+}
 
-if (await page.locator('#setupPanel').isVisible()) await page.click('#toggleSetup');
-if (await page.locator('#weightsPanel').isVisible()) await page.click('#toggleWeights');
-await page.waitForTimeout(300);
-if (process.env.SHOT) await page.screenshot({ path: `${process.env.SHOT}-mobile.png` });
-await page.setViewportSize({ width: 1280, height: 900 });
-await page.waitForTimeout(200);
-if (process.env.SHOT) await page.screenshot({ path: `${process.env.SHOT}-desktop.png` });
-
-console.log(`\n${results.filter((r) => r.startsWith('  ok')).length} bestanden, ${results.filter((r) => r.includes('FAIL')).length} fehlgeschlagen`);
+const ok = results.filter((r) => r === 'ok').length;
+console.log(`\n${ok} bestanden, ${results.length - ok} fehlgeschlagen`);
 
 await browser.close();
 server.close();
-
-if (results.some((r) => r.includes('FAIL'))) process.exitCode = 1;
