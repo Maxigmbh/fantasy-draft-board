@@ -54,12 +54,14 @@ async function reset() {
       a.openTiers = new Set([1]);
       a.drafted.clear();
     });
+    // Erst zur Board-Ansicht wechseln (das zeigt #fSort erst wieder an — in
+    // den Nebenlisten bleibt es ausgeblendet), danach die uebrigen Regler.
+    await page.click('.view[data-view="board"]');
+    await page.click('.tab[data-pos="ALLE"]');
     await page.fill('#fSearch', '');
     await page.selectOption('#fSort', 'score');
     await page.uncheck('#fExpandAll');
     await page.check('#fHideDrafted');
-    await page.click('.view[data-view="board"]');
-    await page.click('.tab[data-pos="ALLE"]');
   } catch { /* vor dem ersten Laden nichts zurueckzusetzen */ }
 }
 const check = async (name, fn) => {
@@ -134,9 +136,11 @@ await check('Suche findet einen einzelnen Spieler', async () => {
 await check('Sortierung nach Experten-Ranking ordnet neu', async () => {
   const byScore = await page.locator('.row:not(.row--head) .c--name b').first().innerText();
   await page.selectOption('#fSort', 'ecr');
-  const ecrs = await page.locator('.row:not(.row--head)').first().locator('.c--ecr b').innerText();
+  // Die ECR-Zahl steht jetzt klein ("ECR 1.1"), gross steht die Vorjahres-Positionierung.
+  const ecrSmall = await page.locator('.row:not(.row--head)').first().locator('.c--ecr small').innerText();
+  const ecrValue = Number(ecrSmall.replace('ECR', '').trim());
   const first = await page.locator('.row:not(.row--head) .c--name b').first().innerText();
-  assert.ok(Number(ecrs) < 3, `bestes ECR zuerst (${ecrs})`);
+  assert.ok(ecrValue < 3, `bestes ECR zuerst (${ecrSmall})`);
   assert.ok(byScore !== first || true, `Score: ${byScore}, ECR: ${first}`);
   assert.equal(await page.locator('.tier').count(), 0, 'ohne Score-Sortierung keine Tiers');
 });
@@ -170,13 +174,14 @@ await check('Bei Gewichtung null steht exakt die Expertenrangliste', async () =>
   await page.click('#toggleWeights');
 });
 
-await check('Tabelle zeigt die Spalten der Vorlage', async () => {
+await check('Tabelle zeigt die Spalten der Vorlage, ECR-Spalte ersetzt durch die grosse Vorjahres-Positionierung', async () => {
   // text-transform: uppercase schlaegt auf innerText durch — case-insensitiv pruefen.
   const head = (await page.locator('.row--head').first().innerText()).toLowerCase();
-  for (const label of ['rk', 'pick', 'spieler', 'pos', 'alter', 'best', 'worst', 'ecr', 'bye', 'off', 'sos', 'score']) {
+  for (const label of ['rk', 'pick', 'spieler', 'pos', 'alter', 'best', 'worst', 'bye', 'off', 'sos', 'score']) {
     assert.ok(head.includes(label), `Spalte ${label} fehlt in: ${head.replace(/\s+/g, ' ')}`);
   }
-  assert.ok(!/Std|ADP/i.test(head), 'keine Std.Dev- und keine ADP-Spalte');
+  assert.match(head, /'\d{2}\s*rang/, `Spaltenkopf nennt die Vorjahres-Rang-Spalte, war: ${head}`);
+  assert.ok(!/Std|ADP/i.test(head) && !/\becr\b/.test(head), 'keine Std.Dev-, ADP- oder woertliche ECR-Spalte mehr');
   const first = page.locator('.row:not(.row--head)').first();
   // .c--name ist ein Flex-Container: innerText trennt die Kinder mit Zeilenumbruch.
   const nameCell = (await first.locator('.c--name').innerText()).replace(/\s+/g, ' ').trim();
@@ -184,6 +189,11 @@ await check('Tabelle zeigt die Spalten der Vorlage', async () => {
   assert.match(await first.locator('.c--pos').innerText(), /^(QB|RB|WR|TE|K|DST)\d+$/, 'Position mit Rang');
   const age = Number(await first.locator('.c--num').first().innerText());
   assert.ok(age > 19 && age < 42, `plausibles Alter (${age})`);
+  // Die ECR-Zelle: gross die Vorjahres-Positionierung, klein die eigentliche ECR-Zahl.
+  const big = await first.locator('.c--ecr b').innerText();
+  assert.match(big, /^(QB|RB|WR|TE|K|DST)\d+ '\d{2}$|^Rookie$/, `Grosse Vorjahres-Positionierung, war: ${big}`);
+  const small = await first.locator('.c--ecr small').innerText();
+  assert.match(small, /^ECR \d/, `Kleine ECR-Angabe, war: ${small}`);
 });
 
 await check('Checkbox markiert, ohne die Zeile aufzuklappen', async () => {
@@ -257,7 +267,33 @@ await check('Ansicht Rookies und Breakouts listet spaete Kandidaten', async () =
   assert.ok(rows > 10, `${rows} Kandidaten`);
   assert.equal(await page.locator('.tier').count(), 0, 'Nebenliste ohne Tiers');
   assert.ok(await page.locator('.badge--rookie').count() > 0, 'Rookies markiert');
-  assert.equal(await page.locator('#posTabs[hidden]').count(), 1, 'Positionsfilter ausgeblendet');
+  // Kein Selbstverweis: ein Mitglied dieser Liste zeigt hier nicht zusaetzlich sein eigenes "Breakout"-Tag.
+  assert.equal(await page.locator('.badge--breakout').count(), 0, 'kein Breakout-Tag auf der eigenen Liste');
+});
+
+await check('Positionsfilter und Suche wirken auch in den Nebenlisten (vorher wirkungslos)', async () => {
+  await page.click('.view[data-view="breakouts"]');
+  await page.waitForSelector('#viewLead:not([hidden])');
+  assert.equal(await page.locator('#posTabs').isHidden(), false, 'Positions-Tabs sind sichtbar');
+  assert.equal(await page.locator('#fSort').isHidden(), true, 'Sortierung ausgeblendet — die Liste hat eine eigene Reihenfolge');
+
+  const total = await page.locator('.row:not(.row--head)').count();
+  await page.click('.tab[data-pos="RB"]');
+  const rbOnly = await page.locator('.row:not(.row--head) .pos').allInnerTexts();
+  assert.ok(rbOnly.length > 0 && rbOnly.length < total, `RB-Filter grenzt ein (${rbOnly.length} von ${total})`);
+  assert.ok(rbOnly.every((t) => t.startsWith('RB')), `nur RB, war: ${rbOnly.slice(0, 3)}`);
+  assert.match(await page.locator('#listMeta').innerText(), new RegExp(`${rbOnly.length} von ${total} Spielern`));
+
+  await page.click('.tab[data-pos="ALLE"]');
+  const name = await page.evaluate((kind) => {
+    const ids = window.__board.data.lists[kind];
+    return window.__board.players.find((p) => p.id === ids[0]).name;
+  }, 'breakouts');
+  await page.fill('#fSearch', name);
+  const found = await page.locator('.row:not(.row--head) .c--name b').allInnerTexts();
+  assert.ok(found.includes(name), `Suche findet ${name} in der Nebenliste`);
+  assert.ok(found.length < total, 'Suche grenzt ein');
+  await page.fill('#fSearch', '');
 });
 
 await check('Ansicht Versteckte Werte zeigt echte Verletzungsfunde und die Vorjahres-Positionierung', async () => {
@@ -267,11 +303,35 @@ await check('Ansicht Versteckte Werte zeigt echte Verletzungsfunde und die Vorja
   const rows = page.locator('.row:not(.row--head)');
   const count = await rows.count();
   assert.ok(count > 10, `${count} Spieler`);
-  // Die ECR-Zelle traegt die Vorjahres-Positionierung als Kleintext, z.B. "RB2 '25".
-  const priorLabel = await rows.first().locator('.c--ecr small').innerText();
+  // Die ECR-Zelle traegt die Vorjahres-Positionierung gross, z.B. "RB2 '25".
+  const priorLabel = await rows.first().locator('.c--ecr b').innerText();
   assert.match(priorLabel, /^(QB|RB|WR|TE|K|DST)\d+ '\d{2}$|^Rookie$/, `Vorjahres-Label: ${priorLabel}`);
   // Mindestens ein Eintrag traegt das echte Verletzungs-Badge, nicht nur den Ranking-Abstand.
   assert.ok(await page.locator('.badge--bad').count() > 0, 'mindestens ein Verletzungs-Badge sichtbar');
+  assert.equal(await page.locator('.badge--hidden').count(), 0, 'kein Versteckt-Tag auf der eigenen Liste');
+
+  // Positionsfilter greift auch hier.
+  await page.click('.tab[data-pos="WR"]');
+  const wrOnly = await page.locator('.row:not(.row--head) .pos').allInnerTexts();
+  assert.ok(wrOnly.length > 0 && wrOnly.every((t) => t.startsWith('WR')), `nur WR, war: ${wrOnly.slice(0, 3)}`);
+  await page.click('.tab[data-pos="ALLE"]');
+});
+
+await check('Hauptliste markiert Mitglieder der Nebenlisten mit Cross-Tags', async () => {
+  const ids = await page.evaluate(() => ({
+    breakout: window.__board.data.lists.breakouts[0],
+    discount: window.__board.data.lists.discount[0],
+  }));
+  await page.check('#fExpandAll');
+  await page.uncheck('#fHideDrafted');
+
+  const breakoutRow = page.locator(`.row[data-id="${ids.breakout}"]`);
+  await breakoutRow.scrollIntoViewIfNeeded();
+  assert.equal(await breakoutRow.locator('.badge--breakout').innerText(), 'Breakout');
+
+  const discountRow = page.locator(`.row[data-id="${ids.discount}"]`);
+  await discountRow.scrollIntoViewIfNeeded();
+  assert.equal(await discountRow.locator('.badge--hidden').innerText(), 'Versteckt');
 });
 
 await check('Quellen und Methodik sind ausgewiesen', async () => {

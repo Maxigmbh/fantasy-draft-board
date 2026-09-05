@@ -135,7 +135,7 @@ a { color: var(--accent); }
 .row {
   display: grid;
   grid-template-columns:
-    36px 30px 46px minmax(180px, 1fr) 62px 50px 44px 50px 54px 44px 50px 50px 58px;
+    36px 30px 46px minmax(180px, 1fr) 62px 44px 40px 40px 84px 40px 50px 50px 58px;
   gap: 8px; align-items: center;
   padding: 6px 14px; border-bottom: 1px solid var(--line);
   cursor: pointer; font-variant-numeric: tabular-nums;
@@ -181,6 +181,8 @@ a { color: var(--accent); }
 .badge--rookie { color: var(--te); background: color-mix(in srgb, var(--te) 18%, transparent); }
 .badge--bad { color: var(--bad); background: color-mix(in srgb, var(--bad) 18%, transparent); }
 .badge--backup { color: var(--k); background: color-mix(in srgb, var(--k) 18%, transparent); }
+.badge--breakout { color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.badge--hidden { color: #ec4899; background: color-mix(in srgb, #ec4899 18%, transparent); }
 
 /* ECR-Zelle: Zahl und Vorjahres-Positionierung uebereinander. */
 .c--ecr { text-align: right; display: flex; flex-direction: column; line-height: 1.15; }
@@ -215,13 +217,16 @@ a { color: var(--accent); }
 }
 
 @media (max-width: 1180px) {
-  .row { grid-template-columns: 34px 28px minmax(150px, 1fr) 58px 46px 50px 44px 48px 48px 54px; }
-  .c--pick, .c--num:nth-of-type(2), .c--num:nth-of-type(3) { display: none; }
+  /* Runde+Pick, Best und Worst weichen zuerst — die ECR-Zelle traegt die
+     wichtigste Zusatzinfo (Vorjahres-Rang) bereits selbst. */
+  .row { grid-template-columns: 34px 28px minmax(150px, 1fr) 58px 44px 78px 40px 48px 48px 54px; }
+  .c--pick, .c--best, .c--worst { display: none; }
   .tier__preview { display: none; }
 }
 @media (max-width: 820px) {
-  .row { grid-template-columns: 30px 26px minmax(130px, 1fr) 54px 50px 48px 54px; }
-  .c--num:nth-of-type(1), .c--num:nth-of-type(5) { display: none; }
+  /* rank, check, name, pos, ecr, bye, sos, score — 8 sichtbare Spalten. */
+  .row { grid-template-columns: 26px 24px minmax(120px, 1fr) 50px 74px 40px 46px 50px; }
+  .c--age, .c--off { display: none; }
   .controls { position: static; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

@@ -1,9 +1,10 @@
 # Fantasy Draft Board
 
 Ein eigenes Draftboard nach dem Vorbild von FantasyPros: Spieler in Tiers,
-sortier- und filterbar nach Position, mit dem Expertenranking als Spalte —
-ergänzt um zwei Dinge, die dort fehlen: wie stark die Offense des jeweiligen
-Teams projiziert ist und wie der Spielplan über die Saison aussieht.
+sortier- und filterbar nach Position (auch in den beiden Nebenlisten), mit
+Alter, Best/Worst und der Vorjahres-Positionierung als Spalte — ergänzt um
+zwei Dinge, die dort fehlen: wie stark die Offense des jeweiligen Teams
+projiziert ist und wie der Spielplan über die Saison aussieht.
 
 Dazu zwei Nebenlisten: **Rookies & Breakouts** für die späten Runden und
 **Versteckte Werte** für Spieler, die zuletzt stark produziert haben und
@@ -53,7 +54,7 @@ Quelle.
 | **Pos** | Position mit Rang innerhalb dieses Boards |
 | **Alter** | Alter in Jahren |
 | **Best / Worst** | bester und schlechtester Einzelrang unter den Experten |
-| **ECR** | Expert Consensus Ranking von FantasyPros, darunter klein die Position, auf der er letzte Saison abgeschlossen hat (z. B. "RB4 '25") |
+| **'25 Rang** | groß: Position, auf der er letzte Saison abgeschlossen hat (z. B. "RB4 '25"), oder "Rookie"; klein darunter das aktuelle FantasyPros-Ranking (ECR) — dient weiterhin als Basis der Bewertung, steht aber nicht mehr im Vordergrund |
 | **Bye** | spielfreie Woche |
 | **Off** | Offense-Index des NFL-Teams, aus Wettquoten geschätzt |
 | **SoS** | Spielplan: wie durchlässig die Gegner-Defenses über die Saison sind |

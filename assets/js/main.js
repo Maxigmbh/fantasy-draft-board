@@ -6,7 +6,7 @@
  */
 
 import {
-  POSITIONS, DEFAULT_WEIGHTS, rankPlayers, filterPlayers, groupByTier, resolveList,
+  POSITIONS, DEFAULT_WEIGHTS, rankPlayers, filterPlayers, matchesFilters, groupByTier, resolveList,
 } from './board.js';
 
 const $ = (id) => document.getElementById(id);
@@ -108,17 +108,29 @@ function playerRow(p, { showRank = true } = {}) {
   if (p.handcuff) {
     marks.push(`<span class="badge badge--backup" title="Rueckt fuer ${esc(p.handcuffFor)} nach, falls der ausfaellt">Backup</span>`);
   }
+  // Cross-Verweis auf die Nebenlisten: in der Hauptliste sichtbar machen, wer
+  // dort steht — aber nicht redundant innerhalb der eigenen Nebenliste selbst.
+  if (app.breakoutIds.has(p.id) && app.view !== 'breakouts') {
+    marks.push('<span class="badge badge--breakout" title="Steht in Rookies & Breakouts">Breakout</span>');
+  }
+  if (app.discountIds.has(p.id) && app.view !== 'discount') {
+    marks.push('<span class="badge badge--hidden" title="Steht in Versteckte Werte">Versteckt</span>');
+  }
   if (p.rookie) marks.push('<span class="badge badge--rookie">Rookie</span>');
   if (p.team === 'FA') marks.push('<span class="badge badge--warn">ohne Team</span>');
   if (p.value >= 12) marks.push(`<span class="badge badge--good">Wert ${signed(p.value)}</span>`);
   else if (p.value <= -12) marks.push(`<span class="badge badge--warn">Reach ${signed(p.value)}</span>`);
 
-  const cell = (v, extra = '') => `<span class="c c--num ${extra}">${v}</span>`;
+  // Jede Zahlenspalte bekommt zusaetzlich zu c--num eine eigene Klasse (col),
+  // damit sie sich in den schmalen Breakpoints gezielt ausblenden laesst —
+  // :nth-of-type zaehlt sonst alle <span>-Geschwister, nicht nur die mit
+  // c--num, und traf dort nie die richtige Zelle.
+  const cell = (v, col, extra = '') => `<span class="c c--num c--${col} ${extra}">${v}</span>`;
   const tone = (x) => (x > 0.15 ? 'up' : (x < -0.15 ? 'down' : ''));
-  // Vorjahres-Positionierung direkt unter der ECR, wie gewuenscht: nicht als
-  // eigene Spalte, sondern als Ergaenzung der bestehenden ECR-Zelle.
-  const priorLabel = p.priorPosRank ? `${p.pos}${p.priorPosRank} '${String(app.data.meta.priorSeason).slice(-2)}`
-    : (p.rookie ? 'Rookie' : '—');
+  // Primär zeigt diese Zelle jetzt die Vorjahres-Positionierung (groß), das
+  // aktuelle FantasyPros-Ranking (ECR) steht klein darunter als Einordnung.
+  const priorYearShort = String(app.data.meta.priorSeason).slice(-2);
+  const priorBig = p.priorPosRank ? `${p.pos}${p.priorPosRank}` : (p.rookie ? 'Rookie' : '—');
 
   return `
     <li class="${cls.join(' ')}" data-id="${esc(p.id)}">
@@ -133,16 +145,16 @@ function playerRow(p, { showRank = true } = {}) {
         ${marks.join('')}
       </span>
       <span class="c c--pos"><i class="pos pos--${esc(p.pos)}">${esc(p.pos)}${p.boardPosRank}</i></span>
-      ${cell(p.age !== null ? p.age.toFixed(1) : '—')}
-      ${cell(p.best ?? '—')}
-      ${cell(p.worst ?? '—')}
-      <span class="c c--ecr">
-        <b>${p.ecr.toFixed(1)}</b>
-        <small>${esc(priorLabel)}</small>
+      ${cell(p.age !== null ? p.age.toFixed(1) : '—', 'age')}
+      ${cell(p.best ?? '—', 'best')}
+      ${cell(p.worst ?? '—', 'worst')}
+      <span class="c c--ecr" title="Position, auf der er die Saison ${app.data.meta.priorSeason} abgeschlossen hat. Klein darunter: aktuelles FantasyPros-Ranking (ECR).">
+        <b>${esc(priorBig)}${p.priorPosRank ? ` '${priorYearShort}` : ''}</b>
+        <small>ECR ${p.ecr.toFixed(1)}</small>
       </span>
-      ${cell(p.bye || '—')}
-      ${cell(signed(p.offenseIndex * 100), tone(p.offenseIndex))}
-      ${cell(signed(p.sosIndex * 100), tone(p.sosIndex))}
+      ${cell(p.bye || '—', 'bye')}
+      ${cell(signed(p.offenseIndex * 100), 'off', tone(p.offenseIndex))}
+      ${cell(signed(p.sosIndex * 100), 'sos', tone(p.sosIndex))}
       <span class="c c--score">${p.score.toFixed(1)}</span>
     </li>
     ${app.expanded === p.id ? detailRow(p) : ''}`;
@@ -186,22 +198,25 @@ function detailRow(p) {
     </li>`;
 }
 
-const HEAD = `
+function headHtml() {
+  const year = String(app.data.meta.priorSeason).slice(-2);
+  return `
   <li class="row row--head">
     <span class="c c--rank">RK</span>
     <span class="c c--check"></span>
     <span class="c c--pick">Pick</span>
     <span class="c c--name">Spieler</span>
     <span class="c c--pos">Pos</span>
-    <span class="c c--num">Alter</span>
-    <span class="c c--num">Best</span>
-    <span class="c c--num">Worst</span>
-    <span class="c c--ecr" title="Expert Consensus Ranking von FantasyPros, darunter die Position, auf der er letzte Saison abgeschlossen hat">ECR</span>
-    <span class="c c--num">Bye</span>
-    <span class="c c--num" title="Offense-Staerke des Teams, aus Wettquoten geschaetzt">Off</span>
-    <span class="c c--num" title="Durchlaessigkeit der Gegner-Defenses ueber die Saison">SoS</span>
+    <span class="c c--num c--age">Alter</span>
+    <span class="c c--num c--best">Best</span>
+    <span class="c c--num c--worst">Worst</span>
+    <span class="c c--ecr" title="Position, auf der er die Saison ${app.data.meta.priorSeason} abgeschlossen hat. Klein darunter: aktuelles FantasyPros-Ranking (ECR).">'${year} Rang</span>
+    <span class="c c--num c--bye">Bye</span>
+    <span class="c c--num c--off" title="Offense-Staerke des Teams, aus Wettquoten geschaetzt">Off</span>
+    <span class="c c--num c--sos" title="Durchlaessigkeit der Gegner-Defenses ueber die Saison">SoS</span>
     <span class="c c--score">Score</span>
   </li>`;
+}
 
 function renderBoard() {
   const list = filterPlayers(app.players, {
@@ -215,7 +230,7 @@ function renderBoard() {
 
   $('views').innerHTML = groups.map((g) => {
     if (g.tier === null) {
-      return `<ol class="list">${HEAD}${g.players.map((p) => playerRow(p)).join('')}</ol>`;
+      return `<ol class="list">${headHtml()}${g.players.map((p) => playerRow(p)).join('')}</ol>`;
     }
     const open = app.expandAll || app.openTiers.has(g.tier);
     const best = g.players[0];
@@ -228,19 +243,26 @@ function renderBoard() {
           <span class="tier__meta">${g.players.length} Spieler · Score ${best.score.toFixed(1)}–${worst.score.toFixed(1)}</span>
           <span class="tier__preview">${g.players.slice(0, 5).map((p) => esc(surname(p.name))).join(' · ')}${g.players.length > 5 ? ' …' : ''}</span>
         </button>
-        ${open ? `<ol class="list">${HEAD}${g.players.map((p) => playerRow(p)).join('')}</ol>` : ''}
+        ${open ? `<ol class="list">${headHtml()}${g.players.map((p) => playerRow(p)).join('')}</ol>` : ''}
       </section>`;
   }).join('') || '<p class="hint pad">Keine Spieler für diesen Filter.</p>';
 }
 
 function renderList(kind) {
-  const ids = app.data.lists[kind] || [];
-  const chosen = resolveList(app.players, ids)
-    .filter((p) => !(app.hideDrafted && app.drafted.has(p.id)));
-  $('listMeta').textContent = `${chosen.length} Spieler`;
+  const all = resolveList(app.players, app.data.lists[kind] || []);
+  // Dieselbe Filterlogik wie im Board (Position/FLEX, Suche, gedraftet
+  // ausblenden) — bislang wurden Positionsfilter und Suche hier ignoriert.
+  // Die kuratierte Reihenfolge bleibt erhalten, es wird nicht neu sortiert:
+  // sie tragen eigene Bedeutung (z. B. Verletzungsfund vor Ranking-Abstand).
+  const chosen = all.filter((p) => matchesFilters(p, {
+    pos: app.filters.pos, search: app.filters.search, drafted: app.drafted, hideDrafted: app.hideDrafted,
+  }));
+  $('listMeta').textContent = chosen.length === all.length
+    ? `${chosen.length} Spieler`
+    : `${chosen.length} von ${all.length} Spielern`;
   $('views').innerHTML = chosen.length
-    ? `<ol class="list">${HEAD}${chosen.map((p) => playerRow(p)).join('')}</ol>`
-    : '<p class="hint pad">Nichts übrig — alle bereits markiert.</p>';
+    ? `<ol class="list">${headHtml()}${chosen.map((p) => playerRow(p)).join('')}</ol>`
+    : '<p class="hint pad">Nichts übrig für diesen Filter.</p>';
 }
 
 const LEADS = {
@@ -256,7 +278,10 @@ const LEADS = {
 function render() {
   const isBoard = app.view === 'board';
   $('controls').classList.toggle('controls--slim', !isBoard);
-  $('posTabs').hidden = !isBoard;
+  // Positionsfilter (inkl. FLEX) und Suche gelten auch in den Nebenlisten.
+  // Nur die Sortierung bleibt board-exklusiv: die Nebenlisten haben eine
+  // eigene, bedeutungstragende Reihenfolge.
+  $('fSort').hidden = !isBoard;
   $('viewLead').hidden = isBoard;
   if (!isBoard) $('viewLead').textContent = LEADS[app.view];
 
@@ -424,6 +449,8 @@ async function init() {
       + 'Die Seite braucht einen HTTP-Server — ein Doppelklick auf index.html genügt nicht.</p>';
     return;
   }
+  app.breakoutIds = new Set(app.data.lists.breakouts);
+  app.discountIds = new Set(app.data.lists.discount);
   $('fHideDrafted').checked = app.hideDrafted;
   $('fSort').value = app.filters.sort;
   renderPosTabs();

@@ -104,21 +104,28 @@ export const SORTS = {
   prior: (a, b) => (b.priorPoints ?? -1) - (a.priorPoints ?? -1),
 };
 
-/** Filtert nach Position, Suchtext und bereits gedrafteten Spielern. */
-export function filterPlayers(players, {
-  pos = 'ALLE', search = '', drafted = null, hideDrafted = false, sort = 'score',
-} = {}) {
+/**
+ * Ob ein Spieler zu Positions-, Such- und Gedraftet-Filtern passt.
+ * Eigenstaendig exportiert, damit sowohl die score-sortierte Hauptliste als
+ * auch die kuratierten Nebenlisten (Breakouts, Versteckte Werte) dieselbe
+ * Filterlogik verwenden — dort darf nur nicht zusaetzlich neu sortiert werden,
+ * die kuratierte Reihenfolge traegt eigene Bedeutung (z. B. Verletzung zuerst).
+ */
+export function matchesFilters(p, { pos = 'ALLE', search = '', drafted = null, hideDrafted = false } = {}) {
+  if (pos === 'FLEX') {
+    if (!FLEX.includes(p.pos)) return false;
+  } else if (pos !== 'ALLE' && p.pos !== pos) return false;
+  if (hideDrafted && drafted?.has(p.id)) return false;
   const needle = search.trim().toLowerCase();
-  const list = players.filter((p) => {
-    if (pos === 'FLEX') {
-      if (!FLEX.includes(p.pos)) return false;
-    } else if (pos !== 'ALLE' && p.pos !== pos) return false;
-    if (hideDrafted && drafted?.has(p.id)) return false;
-    if (needle && !p.name.toLowerCase().includes(needle)
-      && !p.team.toLowerCase().includes(needle)) return false;
-    return true;
-  });
-  return [...list].sort(SORTS[sort] || SORTS.score);
+  if (needle && !p.name.toLowerCase().includes(needle)
+    && !p.team.toLowerCase().includes(needle)) return false;
+  return true;
+}
+
+/** Filtert nach Position, Suchtext und bereits gedrafteten Spielern. */
+export function filterPlayers(players, opts = {}) {
+  const list = players.filter((p) => matchesFilters(p, opts));
+  return [...list].sort(SORTS[opts.sort] || SORTS.score);
 }
 
 /**
