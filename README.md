@@ -63,32 +63,66 @@ zurückgibt — und das kann ESPN jederzeit ändern.
 
 ### B) Über den ESPN-Tab (der verlässliche Weg)
 
-Ein Bookmarklet läuft im ESPN-Tab selbst. Dort sind die Anfragen
-*gleich-origin*: kein CORS, und die Anmeldung an der eigenen (auch privaten)
-Liga gilt automatisch. Die Daten gehen per `postMessage` an das Board.
+Der Code läuft im ESPN-Tab selbst. Dort sind die Anfragen *gleich-origin*: kein
+CORS, und die Anmeldung an der eigenen (auch privaten) Liga gilt automatisch.
+Die Daten gehen per `postMessage` ans Board. Zwei Varianten.
 
-1. Im Board **Setup → Über ESPN-Tab verbinden** öffnen.
-2. Den Link **Fantasy-Bridge** in die Lesezeichenleiste ziehen.
-   Auf dem iPhone: „Adresse kopieren", ein beliebiges Lesezeichen anlegen und
-   die kopierte Adresse als URL einsetzen.
-3. Auf `fantasy.espn.com` die Liga bzw. den Draft-Raum öffnen.
-4. Das Lesezeichen anklicken. Es öffnet das Board und schickt Spielerpool,
-   Spielplan, Defense-Ratings und danach laufend die Draft-Picks hinüber.
+**B1 — Konsole (Mac, Safari und Chrome).** Kein Lesezeichen nötig:
 
-Das Bookmarklet überträgt ausschließlich Spieldaten. Cookies, `espn_s2` und
-`SWID` verlassen den ESPN-Tab nicht — der Board-Empfänger akzeptiert
-Nachrichten zudem nur von ESPN-Origins.
+1. Safari einmalig vorbereiten: Einstellungen (`⌘,`) → **Erweitert** →
+   *Funktionen für Webentwickler anzeigen*.
+2. Im Board **Setup → Über ESPN-Tab verbinden → ESPN-Tab öffnen**.
+   Wichtig: nur ein so geöffneter Tab kann Daten zurückschicken — das Board ist
+   dort `window.opener`. Ein selbst geöffneter ESPN-Tab funktioniert nicht.
+3. Im ESPN-Tab einloggen, Draft-Raum öffnen, Konsole aufrufen
+   (Safari `⌥⌘C`, Chrome `⌥⌘J`).
+4. Im Board **Befehl kopieren**, in die Konsole einfügen, Return.
 
-### C) Manuell
+Der Schnipsel holt Einstellungen, Spielerpool, Spielplan und Defense-Ratings
+einmalig und danach den Draft-Stand im eingestellten Intervall. Stoppen mit
+`clearInterval(window.__fbTimer)`.
+
+Er öffnet bewusst kein Fenster: ein Aufruf aus der Konsole gilt nicht als
+Nutzergeste, Safari würde das Pop-up blocken.
+
+**B2 — Bookmarklet (iPhone).** Im Board **Adresse kopieren**, dann ein
+beliebiges Lesezeichen anlegen und dessen Adresse durch die kopierte ersetzen.
+Safari lässt sich `javascript:`-Adressen nicht in die Lesezeichenleiste ziehen —
+der Umweg über *Lesezeichen bearbeiten* ist nötig.
+
+Beide Varianten übertragen ausschließlich Spieldaten. Cookies, `espn_s2` und
+`SWID` verlassen den ESPN-Tab nicht; der Empfänger im Board akzeptiert
+Nachrichten nur von ESPN-Origins.
+
+### C) Antwort einfügen (funktioniert immer)
+
+Braucht weder Konsole noch Lesezeichen — nur Kopieren und Einfügen:
+
+1. Im Board **Setup → Über ESPN-Tab verbinden**. Unter Punkt 3 stehen die
+   fertigen ESPN-Adressen für deine Liga.
+2. Adresse anklicken: im eingeloggten Browser antwortet ESPN mit reinem JSON.
+   Das ist eine normale Seitennavigation, also greift kein CORS.
+3. `⌘A`, `⌘C`, zurück ins Board, ins Feld einfügen, **Übernehmen**.
+
+Für den laufenden Draft reicht die erste Adresse (`mDraftDetail`); sie lässt
+sich beliebig oft wiederholen. Das Board erkennt am Inhalt selbst, ob es
+Draft-Picks, Spielerpool, Spielplan, Defense-Ratings oder Einstellungen
+bekommen hat.
+
+Einschränkung: Der **Spielerpool** braucht den Header `X-Fantasy-Filter` und
+lässt sich deshalb nicht über eine blanke Adresse holen — dafür ist Weg A oder B
+nötig. Draft, Spielplan, Ratings und Einstellungen funktionieren so.
+
+### D) Manuell
 
 Jeder Spieler lässt sich in der Detailansicht als gedraftet markieren.
 Picks, die aus ESPN kommen, sind gegen Überschreiben geschützt.
 
-### D) Proxy (Sonderfall)
+### E) Proxy (Sonderfall)
 
 `proxy/worker.js` ist ein fertiger Cloudflare Worker, der ausschließlich lesende
-ESPN-Endpunkte durchreicht. Nur nötig, wenn A scheitert und B nicht in Frage
-kommt. Anleitung steht in der Datei.
+ESPN-Endpunkte durchreicht. Nur nötig, wenn A scheitert und weder B noch C in
+Frage kommen. Anleitung steht in der Datei.
 
 ---
 
@@ -158,7 +192,8 @@ keinen Lauf gegen die echte API.
   Endpunkte können sich ohne Ankündigung ändern. Die Parser sind defensiv
   geschrieben und liefern im Zweifel leere Ergebnisse statt Abstürzen; das
   Panel **Diagnose & Datenquellen** zeigt für jede Anfrage, ob sie geklappt hat.
-- Für private Ligen funktioniert nur Weg B (oder ein Proxy mit hinterlegtem
-  Cookie).
+- Für private Ligen funktionieren die Wege B und C, weil beide die Anmeldung
+  im ESPN-Tab bzw. im Browser nutzen. Weg A braucht dafür einen Proxy mit
+  hinterlegtem Cookie.
 - Projektionen stammen von ESPN. Das Board gewichtet sie neu, es erstellt keine
   eigenen Prognosen.

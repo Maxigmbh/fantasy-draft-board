@@ -76,6 +76,14 @@ async function reset() {
     await page.uncheck('#fOnlyHealthy');
     await page.uncheck('#fHideDrafted');
     await page.selectOption('#fSort', 'score');
+    // Direkt im DOM leeren: das Feld ist meist verborgen, page.fill wuerde
+    // auf Sichtbarkeit warten und jeden Check um das Timeout verlaengern.
+    await page.evaluate(() => {
+      const box = document.getElementById('pasteBox');
+      if (box) box.value = '';
+      const status = document.getElementById('pasteStatus');
+      if (status) status.textContent = '';
+    });
   } catch { /* vor dem ersten Laden gibt es nichts zurueckzusetzen */ }
 }
 
@@ -235,11 +243,69 @@ await check('Bookmarklet wird für die eigene Origin erzeugt', async () => {
   assert.ok(code.includes(`'http://localhost:${PORT}'`), 'Ziel-Origin eingebettet');
 });
 
-await check('Bridge nimmt Draft-Daten per postMessage entgegen', async () => {
-  // Nachricht von einer fremden Origin muss ignoriert werden.
-  await page.evaluate(() => window.postMessage({ source: 'espn-bridge', kind: 'draft', payload: { draftDetail: { picks: [] } } }, '*'));
-  await page.waitForTimeout(200);
-  assert.match(await page.locator('#statusChips').innerText(), /12 gedraftet/, 'fremde Origin ändert nichts');
+await check('Direktadressen werden mit der Liga-ID aufgelistet', async () => {
+  if (!(await page.locator('#setupPanel').isVisible())) await page.click('#toggleSetup');
+  await page.click('#btnBridge');
+  const links = await page.locator('#directLinks a').evaluateAll(
+    (nodes) => nodes.map((n) => n.getAttribute('href')),
+  );
+  assert.equal(links.length, 4, 'vier Adressen');
+  assert.ok(links[0].includes('leagues/1234567'), 'Liga-ID eingesetzt');
+  assert.ok(links[0].includes('view=mDraftDetail'), 'Draft zuerst');
+  assert.ok(links.every((l) => l.startsWith('https://lm-api-reads.fantasy.espn.com/')));
+});
+
+await check('Draft laesst sich per Einfuegen uebernehmen', async () => {
+  if (!(await page.locator('#setupPanel').isVisible())) await page.click('#toggleSetup');
+  await page.click('#btnBridge');
+  // Groesserer Draft-Stand als der, den das Polling geliefert hat.
+  const payload = JSON.stringify(fx.makeDraftResponse({ picks: 30, teams: 10, playerIds }));
+  await page.fill('#pasteBox', payload);
+  await page.click('#btnApplyPaste');
+  assert.match(await page.locator('#pasteStatus').innerText(), /30 Picks übernommen/);
+  assert.equal(await page.locator('#pasteBox').inputValue(), '', 'Feld wird geleert');
+  await page.waitForFunction(
+    () => /30 gedraftet/.test(document.getElementById('statusChips').innerText),
+    null, { timeout: 5000 },
+  );
+  // reset() blendet gedraftete Spieler ein — fuer die Zaehlprobe wieder ausblenden.
+  await page.check('#fHideDrafted');
+  await page.waitForFunction(
+    () => /von 546 Spielern/.test(document.getElementById('listMeta').innerText),
+    null, { timeout: 5000 },
+  );
+});
+
+await check('Unbrauchbare Eingaben werden verstaendlich abgewiesen', async () => {
+  if (!(await page.locator('#setupPanel').isVisible())) await page.click('#toggleSetup');
+  await page.click('#btnBridge');
+  await page.fill('#pasteBox', 'das ist kein json');
+  await page.click('#btnApplyPaste');
+  assert.match(await page.locator('#pasteStatus').innerText(), /kein gültiges JSON/);
+  await page.fill('#pasteBox', '{"irgendwas":123}');
+  await page.click('#btnApplyPaste');
+  assert.match(await page.locator('#pasteStatus').innerText(), /nicht erkannt/);
+  await page.fill('#pasteBox', '');
+});
+
+await check('Spielerpool laesst sich per Einfuegen ersetzen', async () => {
+  if (!(await page.locator('#setupPanel').isVisible())) await page.click('#toggleSetup');
+  await page.click('#btnBridge');
+  await page.fill('#pasteBox', JSON.stringify(fx.makePlayersResponse({})));
+  await page.click('#btnApplyPaste');
+  assert.match(await page.locator('#pasteStatus').innerText(), /576 Spieler übernommen/);
+});
+
+await check('Bridge ignoriert Nachrichten fremder Herkunft', async () => {
+  const before = await page.evaluate(() => window.__board.draftState.count);
+  assert.ok(before > 0, 'es gibt einen Draft-Stand, der sich veraendern koennte');
+  // Eine Nachricht aus dieser Seite selbst traegt deren Origin, nicht ESPN.
+  await page.evaluate(() => window.postMessage(
+    { source: 'espn-bridge', kind: 'draft', payload: { draftDetail: { picks: [] } } }, '*',
+  ));
+  await page.waitForTimeout(300);
+  const after = await page.evaluate(() => window.__board.draftState.count);
+  assert.equal(after, before, 'fremde Origin aendert den Draft-Stand nicht');
 });
 
 await check('Teilen-Link enthält Liga und Gewichte', async () => {

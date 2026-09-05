@@ -85,20 +85,58 @@
     </details>
 
     <div id="bridgeBox" class="bridgebox" hidden>
-      <h3>ESPN-Tab verbinden</h3>
+      <h3>ESPN-Daten holen</h3>
+      <p class="hint">
+        Drei Wege — der erste ist auf dem Mac der zuverlässigste, der dritte
+        funktioniert immer und braucht nichts weiter als Kopieren und Einfügen.
+      </p>
+
+      <h4 class="bridgebox__step">1 · Konsole im ESPN-Tab <span class="badge badge--good">Mac / Safari</span></h4>
       <ol class="steps">
-        <li>Den Link <b>Fantasy-Bridge</b> unten in die Lesezeichenleiste ziehen
-            (iPhone: Lesezeichen anlegen und die kopierte Adresse einsetzen).</li>
-        <li>Auf <code>fantasy.espn.com</code> deine Liga bzw. den Draft-Raum öffnen.</li>
-        <li>Das Lesezeichen dort anklicken — es öffnet dieses Board und schickt
-            Spielerpool und Draft-Picks laufend hinüber.</li>
+        <li>Unten auf <b>ESPN-Tab öffnen</b> klicken. Wichtig: nur dieser Tab ist
+            mit dem Board verbunden — ein selbst geöffneter Tab funktioniert nicht.</li>
+        <li>Dort einloggen und den Draft-Raum öffnen.</li>
+        <li>Konsole öffnen: Safari <code>⌥⌘C</code>, Chrome <code>⌥⌘J</code>.
+            Falls das Menü fehlt: Safari → Einstellungen → Erweitert →
+            „Funktionen für Webentwickler anzeigen“.</li>
+        <li><b>Befehl kopieren</b>, in die Konsole einfügen, Return.</li>
       </ol>
       <p class="btnrow">
-        <a class="btn btn--primary" id="bookmarkletLink" href="#">Fantasy-Bridge</a>
+        <button class="btn btn--primary" id="btnOpenEspn">ESPN-Tab öffnen</button>
+        <button class="btn" id="btnCopyConsole">Befehl kopieren</button>
+      </p>
+
+      <h4 class="bridgebox__step">2 · Bookmarklet <span class="badge">iPhone</span></h4>
+      <p class="hint">
+        Adresse kopieren, ein beliebiges Lesezeichen anlegen und dessen Adresse
+        durch die kopierte ersetzen. Danach im ESPN-Tab aufrufen.
+      </p>
+      <p class="btnrow">
+        <a class="btn btn--ghost" id="bookmarkletLink" href="#">Fantasy-Bridge</a>
         <button class="btn btn--ghost" id="btnCopyBookmarklet">Adresse kopieren</button>
       </p>
+
+      <h4 class="bridgebox__step">3 · Antwort einfügen <span class="badge badge--good">geht immer</span></h4>
+      <ol class="steps">
+        <li>Eine der Adressen unten anklicken — sie öffnet im eingeloggten
+            Browser reines JSON.</li>
+        <li>Dort <code>⌘A</code>, <code>⌘C</code>.</li>
+        <li>Hier einfügen und auf <b>Übernehmen</b> klicken. Für den laufenden
+            Draft reicht die erste Adresse; einfach wiederholen.</li>
+      </ol>
+      <ul class="linklist" id="directLinks"></ul>
+      <label class="field">
+        <span>ESPN-Antwort einfügen</span>
+        <textarea id="pasteBox" rows="4" spellcheck="false"
+                  placeholder='{"draftDetail":{"picks":[…]}}'></textarea>
+      </label>
+      <p class="btnrow">
+        <button class="btn btn--primary" id="btnApplyPaste">Übernehmen</button>
+        <span class="hint" id="pasteStatus"></span>
+      </p>
+
       <p class="hint">
-        Der Code läuft ausschließlich in deinem Browser. Deine ESPN-Cookies
+        Alles läuft ausschließlich in deinem Browser. Deine ESPN-Cookies
         verlassen den ESPN-Tab nicht — übertragen werden nur die Spieldaten.
       </p>
     </div>

@@ -6,7 +6,10 @@
 import { EspnClient, POSITIONS, healthFactor } from './espn.js';
 import { buildBoard, DEFAULT_WEIGHTS, DEFAULT_STARTERS, positionalLeagueAverage } from './model.js';
 import { loadConfig, saveConfig, writeHash, shareUrl, exportState, importState } from './state.js';
-import { DraftState, DraftPoller, BridgeReceiver, buildBookmarklet } from './sync.js';
+import {
+  DraftState, DraftPoller, BridgeReceiver, buildBookmarklet, buildConsoleSnippet,
+  detectEspnPayload, espnDirectUrls,
+} from './sync.js';
 import {
   renderTabs, renderSliders, renderChips, renderPlayers, renderRoster, renderDiag,
   formatWeight, SLIDER_DEFS, toast, notice,
@@ -275,22 +278,60 @@ function startBridge() {
       }
       renderStatus();
     },
-    onData: ({ kind, value }) => {
-      if (kind === 'players' && value.length) app.raw.players = value;
-      else if (kind === 'schedule') app.raw.schedule = value;
-      else if (kind === 'ratings' && Object.keys(value).length) {
-        app.raw.ratings = value;
-        app.raw.ratingsSeason = app.raw.ratingsSeason ?? app.config.season - 1;
-      } else if (kind === 'settings') app.raw.settings = value;
-      else if (kind === 'draft') {
-        const changed = app.draftState.applyEspnDraft(value);
-        fillTeamSelect();
-        if (changed) toast('Draft aktualisiert');
-      }
-      rebuildSoon();
-    },
+    onData: (data) => { applyIncoming(data); rebuildSoon(); },
   });
   app.bridge.start();
+}
+
+/**
+ * Nimmt eine geparste ESPN-Antwort entgegen — egal ob aus der Bridge oder
+ * von Hand eingefügt — und meldet zurück, was damit passiert ist.
+ */
+function applyIncoming({ kind, value }) {
+  switch (kind) {
+    case 'players':
+      if (!value.length) return 'Spielerpool war leer';
+      app.raw.players = value;
+      return `${value.length} Spieler übernommen`;
+    case 'schedule':
+      if (!Object.keys(value).length) return 'Spielplan war leer';
+      app.raw.schedule = value;
+      return `Spielplan für ${Object.keys(value).length} Teams übernommen`;
+    case 'ratings':
+      if (!Object.keys(value).length) return 'Defense-Ratings waren leer';
+      app.raw.ratings = value;
+      app.raw.ratingsSeason = app.raw.ratingsSeason ?? app.config.season - 1;
+      return 'Defense-Ratings übernommen';
+    case 'settings':
+      app.raw.settings = value;
+      return `Liga-Einstellungen übernommen (${value.teams} Teams)`;
+    case 'draft': {
+      const changed = app.draftState.applyEspnDraft(value);
+      fillTeamSelect();
+      if (changed) toast('Draft aktualisiert');
+      return `${value.picks.length} Picks übernommen`;
+    }
+    default:
+      return 'Unbekannter Datentyp';
+  }
+}
+
+/** Direkt aufrufbare ESPN-Adressen — im eingeloggten Browser liefern sie JSON. */
+function renderDirectLinks() {
+  const el = $('directLinks');
+  if (!app.config.leagueId) {
+    el.innerHTML = '<li class="hint">League-ID eintragen, dann erscheinen hier die Adressen.</li>';
+    return;
+  }
+  const escape = (value) => String(value).replace(/[&<>"]/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]
+  ));
+  const entries = espnDirectUrls({ season: app.config.season, leagueId: app.config.leagueId });
+  el.innerHTML = entries.map((entry) => {
+    const note = entry.live ? ' — während des Drafts wiederholen' : '';
+    return `<li><a href="${escape(entry.url)}" target="_blank" rel="noopener">`
+      + `${escape(entry.label)}</a>${note}</li>`;
+  }).join('');
 }
 
 function fillTeamSelect() {
@@ -360,7 +401,59 @@ function wire() {
       intervalMs: Math.max(5, app.config.syncSeconds) * 1000,
     });
     $('bookmarkletLink').href = href;
+    renderDirectLinks();
     box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  });
+
+  $('btnOpenEspn').addEventListener('click', () => {
+    readForm();
+    if (!app.config.leagueId) { toast('Erst die League-ID eintragen.'); return; }
+    const url = `https://fantasy.espn.com/football/draft?leagueId=${app.config.leagueId}`
+      + `&seasonId=${app.config.season}`;
+    // Der Verweis auf dieses Fenster (window.opener drueben) ist die Bruecke:
+    // nur ein so geoeffneter Tab kann Daten zurueckschicken.
+    app.espnWindow = window.open(url, 'espnDraftTab');
+    if (!app.espnWindow) toast('Safari hat das Fenster blockiert — Pop-ups für diese Seite erlauben.');
+    else toast('ESPN-Tab geöffnet. Dort einloggen, dann den Befehl einfügen.');
+  });
+
+  $('btnCopyConsole').addEventListener('click', async () => {
+    readForm();
+    if (!app.config.leagueId) { toast('Erst die League-ID eintragen.'); return; }
+    const snippet = buildConsoleSnippet({
+      boardUrl: shareUrl(app.config),
+      season: app.config.season,
+      leagueId: app.config.leagueId,
+      intervalMs: Math.max(5, app.config.syncSeconds) * 1000,
+    });
+    try {
+      await navigator.clipboard.writeText(snippet);
+      toast('Befehl kopiert — im ESPN-Tab in die Konsole einfügen');
+    } catch {
+      $('pasteBox').value = snippet;
+      toast('Kopieren blockiert — Befehl steht jetzt im Textfeld unten');
+    }
+  });
+
+  $('btnApplyPaste').addEventListener('click', () => {
+    const text = $('pasteBox').value.trim();
+    const status = $('pasteStatus');
+    if (!text) { status.textContent = 'Nichts eingefügt.'; return; }
+    let raw;
+    try {
+      raw = JSON.parse(text);
+    } catch {
+      status.textContent = 'Das ist kein gültiges JSON — bitte die komplette Antwort einfügen.';
+      return;
+    }
+    const detected = detectEspnPayload(raw, app.config.season);
+    if (!detected) {
+      status.textContent = 'Antwort nicht erkannt. Erwartet werden Draft, Spielerpool, Spielplan, Ratings oder Einstellungen.';
+      return;
+    }
+    status.textContent = applyIncoming(detected);
+    $('pasteBox').value = '';
+    rebuild();
   });
 
   $('bookmarkletLink').addEventListener('click', (e) => {

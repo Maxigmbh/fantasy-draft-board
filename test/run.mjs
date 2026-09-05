@@ -28,7 +28,9 @@ const {
 const {
   buildBoard, replacementRanks, scheduleStrength, positionalLeagueAverage, DEFAULT_WEIGHTS,
 } = await import('../assets/js/model.js');
-const { DraftState, buildBookmarklet } = await import('../assets/js/sync.js');
+const {
+  DraftState, buildBookmarklet, buildConsoleSnippet, detectEspnPayload, espnDirectUrls,
+} = await import('../assets/js/sync.js');
 const { shareUrl, readHash, exportState, importState } = await import('../assets/js/state.js');
 const fx = await import('./fixtures.mjs');
 
@@ -371,6 +373,64 @@ test('Bookmarklet ist gültig, zielgerichtet und kurz genug', () => {
   assert.ok(!code.includes('\n'), 'einzeilig');
   assert.ok(href.length < 8000, `Bookmarklet-Länge ${href.length} unter dem Browser-Limit`);
   // Die Bridge darf keine Anmeldedaten weiterreichen.
+  assert.ok(!/espn_s2|SWID|document\.cookie/.test(code), 'keine Cookies im Transfer');
+});
+
+test('ESPN-Antworten werden am Inhalt erkannt', () => {
+  const cases = [
+    ['draft', fx.makeDraftResponse({ picks: 3, teams: 10, playerIds: [1, 2, 3] })],
+    ['ratings', fx.makeRatingsResponse()],
+    ['schedule', fx.makeScheduleResponse({})],
+    ['players', fx.makePlayersResponse({})],
+    ['settings', fx.makeSettingsResponse({})],
+  ];
+  for (const [expected, raw] of cases) {
+    const got = detectEspnPayload(raw, SEASON);
+    assert.ok(got, `${expected}: erkannt`);
+    assert.equal(got.kind, expected);
+  }
+  // Der Spielplan bringt ebenfalls ein settings-Objekt mit — die Reihenfolge
+  // der Pruefungen darf ihn nicht als Einstellungen missdeuten.
+  assert.equal(detectEspnPayload(fx.makeScheduleResponse({}), SEASON).kind, 'schedule');
+  assert.equal(detectEspnPayload({}, SEASON), null);
+  assert.equal(detectEspnPayload(null, SEASON), null);
+  assert.equal(detectEspnPayload('kein objekt', SEASON), null);
+});
+
+test('Erkannte Antworten liefern dieselben Daten wie der direkte Abruf', () => {
+  const viaPaste = detectEspnPayload(fx.makePlayersResponse({}), SEASON).value;
+  assert.deepEqual(viaPaste.map((p) => p.id), players.map((p) => p.id));
+  const draftRaw = fx.makeDraftResponse({ picks: 8, teams: 10, playerIds: players.slice(0, 8).map((p) => p.id) });
+  assert.equal(detectEspnPayload(draftRaw, SEASON).value.picks.length, 8);
+});
+
+test('Direktadressen zeigen auf die richtigen Views', () => {
+  const urls = espnDirectUrls({ season: 2026, leagueId: '1234567' });
+  const byKey = Object.fromEntries(urls.map((u) => [u.key, u]));
+  assert.ok(byKey.draft.url.includes('/seasons/2026/segments/0/leagues/1234567'));
+  assert.ok(byKey.draft.url.includes('view=mDraftDetail'));
+  assert.equal(byKey.draft.live, true, 'nur der Draft muss wiederholt werden');
+  assert.ok(byKey.schedule.url.includes('view=proTeamSchedules_wl'));
+  assert.ok(!byKey.schedule.url.includes('/leagues/'), 'Spielplan ist ligaunabhaengig');
+  // Defense-Ratings kommen aus der Vorsaison, weil die laufende noch leer ist.
+  assert.ok(byKey.ratings.url.includes('/seasons/2025/'), byKey.ratings.url);
+  assert.equal(urls.filter((u) => u.live).length, 1);
+});
+
+test('Konsolen-Schnipsel nutzt window.opener und oeffnet kein Fenster', () => {
+  const code = buildConsoleSnippet({
+    boardUrl: 'https://beispiel.github.io/fantasy-draft-board/#season=2026',
+    season: 2026, leagueId: '1234567', intervalMs: 12000,
+  });
+  assert.ok(code.includes('window.opener'), 'nutzt den Verweis auf das Board');
+  assert.ok(!code.includes('window.open('), 'oeffnet kein Pop-up (Safari wuerde blocken)');
+  assert.ok(code.includes('"https://beispiel.github.io"'), 'postMessage nur an die eigene Origin');
+  assert.ok(code.includes('"1234567"'), 'Liga eingesetzt');
+  assert.ok(code.includes('view=mDraftDetail'), 'pollt den Draft');
+  assert.ok(code.includes('view=kona_player_info'), 'holt den Spielerpool');
+  assert.ok(code.includes("credentials: 'include'"), 'nutzt die ESPN-Anmeldung');
+  assert.ok(code.includes('setInterval(poll, 12000)'), 'Intervall eingesetzt');
+  assert.ok(code.includes('clearInterval(window.__fbTimer)'), 'mehrfaches Einfuegen verdoppelt nichts');
   assert.ok(!/espn_s2|SWID|document\.cookie/.test(code), 'keine Cookies im Transfer');
 });
 
