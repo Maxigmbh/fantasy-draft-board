@@ -66,8 +66,17 @@ export function parseCsv(text) {
     .map((r) => Object.fromEntries(header.map((h, i) => [h, r[i] ?? ''])));
 }
 
+/**
+ * Zahl aus einem CSV-Feld. Leere Felder muessen null ergeben, nicht 0:
+ * `Number('')` ist in JavaScript 0, und ein fehlender Wert wuerde sonst als
+ * echte Null in die Rechnung eingehen. Die Quellen schreiben fehlende Werte
+ * teils als leeres Feld, teils als "NA".
+ */
 const num = (v) => {
-  const n = Number(v);
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  if (s === '' || s.toUpperCase() === 'NA') return null;
+  const n = Number(s);
   return Number.isFinite(n) ? n : null;
 };
 
@@ -342,7 +351,9 @@ function main() {
       const team = teamCode(r.team);
       const key = nameKey(r.player);
       const priorEntry = prior.get(`${key}|${pos}`) || null;
-      const bio = bioById.get(r.id) || bioByName.get(key) || {};
+      // Team-Defenses sind keine Personen: kein Alter, kein Draft-Jahrgang.
+      // Der Namensabgleich wuerde sonst zufaellig Spieler treffen.
+      const bio = pos === 'DST' ? {} : (bioById.get(r.id) || bioByName.get(key) || {});
       return {
         age: bio.age ?? null,
         draftYear: bio.draftYear ?? null,

@@ -87,6 +87,44 @@ test('Offense und Spielplan messen nicht dasselbe', () => {
   assert.ok(Math.abs(r) < 0.6, `Korrelation ${r.toFixed(2)} zu hoch — Doppelzaehlung`);
 });
 
+test('Leere CSV-Felder werden zu null, nicht zu 0', () => {
+  // Number('') ist in JavaScript 0. Ohne Sonderbehandlung gingen Spiele ohne
+  // Wettquote als "0 Punkte" in die Team-Ratings ein.
+  const rows = parseCsv('a,b,c,d\n1,,NA, \n');
+  assert.equal(rows[0].a, '1');
+  assert.equal(rows[0].b, '');
+  const parsed = Object.fromEntries(Object.entries(rows[0]).map(([k, v]) => {
+    const t = String(v).trim();
+    return [k, t === '' || t.toUpperCase() === 'NA' ? null : Number(t)];
+  }));
+  assert.deepEqual(parsed, { a: 1, b: null, c: null, d: null });
+});
+
+test('Erwartete Punkte liegen im realistischen NFL-Bereich', () => {
+  const implied = Object.values(data.teams).flatMap((t) => t.schedule.map((g) => g.implied));
+  const avg = implied.reduce((a, b) => a + b, 0) / implied.length;
+  // NFL-Teams erzielen im Schnitt gut 23 Punkte. Ein deutlich niedrigerer
+  // Schnitt hiesse, dass Spiele ohne Quote als Nullwerte mitgerechnet werden.
+  assert.ok(avg > 20 && avg < 26, `Mittel ${avg.toFixed(2)} Punkte je Spiel`);
+  assert.ok(Math.min(...implied) > 12, `Minimum ${Math.min(...implied).toFixed(1)}`);
+  assert.ok(Math.max(...implied) < 36, `Maximum ${Math.max(...implied).toFixed(1)}`);
+  assert.ok(data.meta.lineGames > 50 && data.meta.lineGames < 272,
+    `${data.meta.lineGames} Spiele mit Quoten — nicht alle Wochen haben Linien`);
+});
+
+test('Alter ist plausibel und Team-Defenses haben keins', () => {
+  for (const p of data.players) {
+    if (p.pos === 'DST') {
+      assert.equal(p.age, null, `${p.name}: Defense darf kein Alter haben`);
+      assert.equal(p.draftYear, null, `${p.name}: Defense hat keinen Draft-Jahrgang`);
+    } else if (p.age !== null) {
+      assert.ok(p.age >= 20 && p.age <= 45, `${p.name}: Alter ${p.age}`);
+    }
+  }
+  const withAge = data.players.filter((p) => p.age !== null);
+  assert.ok(withAge.length > 400, `${withAge.length} Spieler mit Alter`);
+});
+
 console.log('\nBewertung');
 
 const ranked = rankPlayers(data.players, DEFAULT_WEIGHTS, 12);
