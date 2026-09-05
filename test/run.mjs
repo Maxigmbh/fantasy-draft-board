@@ -230,16 +230,90 @@ test('Rookie- und Breakout-Liste ist aufloesbar und spaet gehandelt', () => {
   assert.ok(list.some((p) => p.rookie), 'enthaelt Rookies');
 });
 
-test('Versteckte Werte: stark im Vorjahr, abgerutscht in der Redraft-Liste', () => {
+test('Versteckte Werte: nur Spieler mit Team, Top-30 in einem der letzten zwei Jahre', () => {
   const list = resolveList(ranked, data.lists.discount);
   assert.equal(list.length, data.lists.discount.length);
+  assert.ok(list.length > 0, 'Liste ist nicht leer');
   for (const p of list) {
-    assert.ok(p.priorPosRank !== null && p.priorPosRank <= 30, `${p.name}: Vorjahresrang`);
-    assert.ok(p.redraftPosRank > p.priorPosRank, `${p.name}: in Redraft abgerutscht`);
-    assert.ok(p.discountGap >= 8, `${p.name}: Abstand ${p.discountGap}`);
-    assert.ok(p.priorPoints > 0, `${p.name}: Vorjahrespunkte`);
-    assert.ok(!['K', 'DST'].includes(p.pos));
+    assert.notEqual(p.team, 'FA', `${p.name}: braucht ein aktuelles Team`);
+    assert.ok(!['RET', 'CUT'].includes(p.rosterStatus), `${p.name}: kein Karriereende/Waiver`);
+    assert.ok(!['K', 'DST'].includes(p.pos), `${p.name}: keine K/DST in dieser Liste`);
+    const wasTop30 = (p.priorPosRank !== null && p.priorPosRank <= 30)
+      || (p.prior2PosRank !== null && p.prior2PosRank <= 30);
+    assert.ok(wasTop30, `${p.name}: Top 30 in mindestens einem der letzten zwei Jahre`);
+    if (p.injuryReserve) {
+      assert.ok(p.injuryLabel, `${p.name}: Verletzungs-Fund braucht ein Label`);
+    } else {
+      // Ohne echten Verletzungsfund greift der Redraft-Vergleich als Ersatzsignal.
+      assert.ok(p.redraftPosRank > p.priorPosRank, `${p.name}: in Redraft abgerutscht`);
+      assert.ok(p.discountGap >= 8, `${p.name}: Abstand ${p.discountGap}`);
+    }
   }
+  assert.ok(list.some((p) => p.injuryReserve), 'mindestens ein echter Verletzungsfund ist enthalten');
+});
+
+test('Verletzungsfund: Rosterstatus kommt aus einer echten Quelle, nicht aus dem Ranking-Abstand', () => {
+  assert.equal(data.meta.hasRosterStatus, true, 'Rosterstatus-Datei wurde geladen');
+  const injured = data.players.filter((p) => p.injuryReserve);
+  assert.ok(injured.length > 0, 'mindestens ein Spieler auf der Reserve-Liste');
+  for (const p of injured) {
+    assert.ok(['IR', 'PUP', 'NFI', 'IR (Rückkehr möglich)'].includes(p.injuryLabel), `${p.name}: ${p.injuryLabel}`);
+    assert.notEqual(p.pos, 'DST', 'Team-Defenses bekommen keinen Rosterstatus zugeordnet');
+  }
+  assert.equal(data.meta.injuredCount, injured.length);
+});
+
+test('Handcuffs sind Running Backs auf Tiefenplatz 2 hinter einem startbaren Starter', () => {
+  assert.equal(data.meta.hasDepthCharts, true, 'Tiefenaufstellung wurde geladen');
+  const handcuffs = resolveList(ranked, data.lists.handcuffs);
+  assert.ok(handcuffs.length > 0, 'mindestens ein Handcuff gefunden');
+  const byId = new Map(ranked.map((p) => [p.id, p]));
+  for (const p of handcuffs) {
+    assert.equal(p.pos, 'RB', `${p.name}: Handcuffs sind ausschliesslich Running Backs`);
+    assert.equal(p.handcuff, true);
+    assert.ok(p.handcuffFor, `${p.name}: kennt seinen Starter`);
+    assert.ok(p.rank > 150, `${p.name}: selbst noch ein Spaetrunden-Spieler (Rang ${p.rank})`);
+    const starter = [...byId.values()].find((s) => s.name === p.handcuffFor && s.team === p.team);
+    assert.ok(starter, `${p.name}: Starter ${p.handcuffFor} im selben Team gefunden`);
+    assert.ok(starter.rank <= 90, `${p.handcuffFor}: selbst startbar (Rang ${starter.rank})`);
+  }
+});
+
+test('ECR-Spalte ist um die Vorjahres-Positionierung ergaenzt', () => {
+  const withPrior = data.players.filter((p) => p.priorPosRank !== null);
+  assert.ok(withPrior.length > 300, `${withPrior.length} Spieler mit Vorjahresrang`);
+  for (const p of withPrior) {
+    assert.ok(p.priorPosRank >= 1, `${p.name}: Rang >= 1`);
+    // Kein Mindestwert: wer die Saison verletzt verpasst hat, steht mit 0
+    // Punkten auf dem letzten Positionsrang, und ein Quarterback mit kurzem,
+    // erfolglosem Einsatz kann sogar negativ abschliessen (Picks/Sacks ohne
+    // Ausgleich). Beides ist echt, kein fehlender Wert — nur extreme Ausreisser
+    // waeren verdaechtig.
+    assert.ok(p.priorPoints > -50 && p.priorPoints < 600, `${p.name}: ${p.priorPoints} Punkte ausserhalb des plausiblen Bereichs`);
+  }
+  // Zweites Vorjahr existiert unabhaengig vom ersten (z. B. verletzt in 2025).
+  const withPrior2 = data.players.filter((p) => p.prior2PosRank !== null);
+  assert.ok(withPrior2.length > 250, `${withPrior2.length} Spieler mit Vorletztjahres-Rang`);
+});
+
+test('Kicker und Team-Defenses folgen der eigenen Positions-Rangliste, nicht der luecken- und ordnungsschwachen Gesamtliste', () => {
+  const kickers = data.players.filter((p) => p.pos === 'K').sort((a, b) => a.ecr - b.ecr);
+  const defenses = data.players.filter((p) => p.pos === 'DST').sort((a, b) => a.ecr - b.ecr);
+  // Deutlich mehr als die alte Gesamtliste (25 K / 24 DST) fuehrte.
+  assert.ok(kickers.length >= 34, `${kickers.length} Kicker im Board`);
+  assert.ok(defenses.length >= 30, `${defenses.length} Defenses im Board`);
+  // ECR ist streng monoton: keine zwei Kicker teilen sich einen Platz.
+  for (let i = 1; i < kickers.length; i += 1) assert.ok(kickers[i].ecr > kickers[i - 1].ecr);
+  for (let i = 1; i < defenses.length; i += 1) assert.ok(defenses[i].ecr > defenses[i - 1].ecr);
+  // Der Kicker-Konsens ist fuer Rang 1 einstimmig (best=worst=1, sd=0) —
+  // das muss nach der Anker+Abstand-Transformation erhalten bleiben.
+  assert.equal(kickers[0].sd, 0, `${kickers[0].name}: einstimmiger Konsens erwartet`);
+  assert.equal(kickers[0].best, kickers[0].worst, `${kickers[0].name}: best=worst erwartet`);
+  // Bei DST ist Rang 1 nicht einstimmig, aber klar vorne: die Streuung
+  // (worst-best) darf nicht groesser sein als bei einem beliebigen Rivalen
+  // mit besserem ECR — sonst haette die Transformation die Reihenfolge verzerrt.
+  assert.ok(defenses[0].worst - defenses[0].best <= 15, `${defenses[0].name}: Spanne ${defenses[0].worst - defenses[0].best}`);
+  assert.equal(defenses[0].name, 'Houston Texans', 'unangefochtene DST1 laut Positions-Rangliste');
 });
 
 console.log('\nPipeline-Bausteine');

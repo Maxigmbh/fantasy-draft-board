@@ -1,13 +1,18 @@
 /**
- * build-data.mjs — Erzeugt assets/data/board.json aus drei offenen Quellen.
+ * build-data.mjs — Erzeugt assets/data/board.json aus offenen Quellen.
  *
  *   1. DynastyProcess  github.com/dynastyprocess/data
  *      FantasyPros Expert Consensus Rankings (taeglicher Scrape):
- *      Dynasty-Gesamtliste, Redraft-Gesamtliste, Rookie-Liste.
+ *      Dynasty-Gesamtliste, Redraft-Gesamtliste, Rookie-Liste,
+ *      Positions-Ranglisten fuer K und DST, Spieler-Stammdaten, Handelswerte.
  *   2. nflverse/nfldata  github.com/nflverse/nfldata
  *      Kompletter NFL-Spielplan der Saison inklusive Wettquoten.
  *   3. hvpkod/NFL-Data  github.com/hvpkod/NFL-Data
  *      Fantasy-Punkte der Vorsaison je Spieler.
+ *   4. nflverse/nflverse-data (Release-Assets, kein Git-Clone)
+ *      Aktueller Rosterstatus (Reserve-Liste = verletzt/gesperrt) und
+ *      Tiefenaufstellung der Running Backs. Wird von diesem Skript selbst
+ *      heruntergeladen, siehe fetchRelease().
  *
  * Aufruf:
  *   git clone --depth 1 https://github.com/dynastyprocess/data   <dir>/dp-data
@@ -16,7 +21,9 @@
  *   node tools/build-data.mjs <dir>
  */
 
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import {
+  readFileSync, writeFileSync, mkdirSync, existsSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -39,6 +46,25 @@ const WEIGHTS = { offense: 0.12, sos: 0.15 };
 /** Teamkuerzel angleichen: die Quellen schreiben drei Teams unterschiedlich. */
 const TEAM_ALIAS = { JAC: 'JAX', LAR: 'LA', LA: 'LA', JAX: 'JAX' };
 const teamCode = (t) => TEAM_ALIAS[t] || t;
+
+/**
+ * K und DST erscheinen in FantasyPros' positionsuebergreifender "Overall"-
+ * Rangliste nur teilweise und in einer Reihenfolge, die von der eigenen
+ * Positions-Rangliste erheblich abweicht (siehe tools/README.md). Fuer beide
+ * Positionen gilt deshalb ausschliesslich die dedizierte Positions-Rangliste;
+ * ihr 1..N-Rang wird linear auf eine Draft-typische Spaetrunden-Lage
+ * abgebildet. ANCHOR ist die angenommene Gesamtposition des besten Spielers,
+ * SPACING der Abstand je weiterem Rang.
+ */
+const KDST_SCALE = {
+  K: { anchor: 145, spacing: 5 },
+  DST: { anchor: 135, spacing: 6 },
+};
+
+/** injuryReserve-Codes gemaess nflreadr-Datenwoerterbuch (Reserve-Liste). */
+const INJURY_ABBR = {
+  R01: 'IR', R04: 'PUP', R05: 'NFI', R48: 'IR (Rückkehr möglich)',
+};
 
 /* ------------------------------------------------------------------ */
 
@@ -192,7 +218,35 @@ function loadCsv(...parts) {
   return parseCsv(readFileSync(path, 'utf8'));
 }
 
-function main() {
+/**
+ * Laedt eine nflverse-Release-Datei bei Bedarf herunter und cached sie lokal.
+ * Anders als die drei Git-Quellen sind Rosterstatus und Tiefenaufstellung
+ * keine Repository-Dateien, sondern GitHub-Release-Assets — deshalb der
+ * direkte Download statt eines weiteren `git clone`.
+ *
+ * Netzzugriff ist optional: schlaegt er fehl, liefert die Funktion `null`
+ * und die Pipeline laeuft ohne Rosterstatus und Handcuff-Erkennung weiter.
+ */
+async function fetchRelease(tag, file) {
+  const dir = join(SRC, 'nflverse-releases');
+  const dest = join(dir, file);
+  if (existsSync(dest)) return readFileSync(dest, 'utf8');
+  try {
+    const url = `https://github.com/nflverse/nflverse-data/releases/download/${tag}/${file}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(dest, text);
+    return text;
+  } catch (err) {
+    console.warn(`Hinweis: ${file} nicht verfuegbar (${err.message}). `
+      + 'Rosterstatus und Handcuff-Erkennung bleiben ohne diese Datei aus.');
+    return null;
+  }
+}
+
+async function main() {
   /* ---- 1. Expertenrankings ---- */
   const ecr = loadCsv('dp-data', 'files', 'db_fpecr_latest.csv');
   const pageOf = (type) => ecr.filter((r) => r.page_type === type);
@@ -218,6 +272,7 @@ function main() {
       draftYear: num(r.draft_year),
       draftRound: num(r.draft_round),
       draftPick: num(r.draft_ovr),
+      gsisId: r.gsis_id || null,
     };
     if (r.fantasypros_id) bioById.set(r.fantasypros_id, bio);
     if (r.name && !bioByName.has(nameKey(r.name))) bioByName.set(nameKey(r.name), bio);
@@ -232,6 +287,38 @@ function main() {
   for (const r of valueRows) {
     const value = num(r.value_1qb);
     if (value !== null) marketByName.set(nameKey(r.player), value);
+  }
+
+  /* ---- 1d. Rosterstatus: wer ist gerade verletzt oder gesperrt? ---- */
+  // status='RES' ist die Reserve-Liste (IR, PUP, NFI, Suspendiert). Das ist
+  // der einzige tatsaechliche Verletzungssignal in offenen Quellen — es
+  // beschreibt den Stand zum Zeitpunkt des Datenabrufs, nicht den Draft-Tag.
+  const rosterText = await fetchRelease('rosters', `roster_${SEASON}.csv`);
+  const statusByGsis = new Map();
+  if (rosterText) {
+    const rosterRows = parseCsv(rosterText);
+    // Bei mehreren Wochen je Spieler zaehlt die zuletzt gemeldete.
+    const latestWeek = new Map();
+    for (const r of rosterRows) {
+      if (!r.gsis_id) continue;
+      const week = num(r.week) ?? 0;
+      if (!latestWeek.has(r.gsis_id) || week >= latestWeek.get(r.gsis_id)) {
+        latestWeek.set(r.gsis_id, week);
+        statusByGsis.set(r.gsis_id, { status: r.status, abbr: r.status_description_abbr });
+      }
+    }
+  }
+
+  /* ---- 1e. Tiefenaufstellung Running Back fuer Handcuff-Erkennung ---- */
+  const depthText = await fetchRelease('depth_charts', `depth_charts_${SEASON}.csv`);
+  const rbDepthByGsis = new Map();
+  if (depthText) {
+    const depthRows = parseCsv(depthText);
+    const latestDt = depthRows.reduce((max, r) => (r.dt > max ? r.dt : max), '');
+    for (const r of depthRows) {
+      if (r.dt !== latestDt || r.pos_name !== 'Running Back' || !r.gsis_id) continue;
+      rbDepthByGsis.set(r.gsis_id, { team: teamCode(r.team), posRank: num(r.pos_rank) });
+    }
   }
 
   /* ---- 2. Spielplan und Team-Ratings ---- */
@@ -315,21 +402,29 @@ function main() {
     info.offenseIndex = Number(clamp(((ratings.offense.get(team) || 0) - offMean) / offSd / 2, -1, 1).toFixed(3));
   }
 
-  /* ---- 3. Vorsaison-Produktion ---- */
-  const prior = new Map();
-  for (const pos of ['QB', 'RB', 'WR', 'TE', 'K']) {
-    let rowsForPos;
-    try {
-      rowsForPos = loadCsv('nfl-stats', 'NFL-data-Players', String(PRIOR), `${pos}_season.csv`);
-    } catch { continue; }
-    const scored = rowsForPos
-      .map((r) => ({ name: r.PlayerName, points: num(r.TotalPoints) ?? 0, team: r.Team }))
-      .filter((p) => p.name)
-      .sort((a, b) => b.points - a.points);
-    scored.forEach((p, i) => {
-      prior.set(`${nameKey(p.name)}|${pos}`, { points: p.points, posRank: i + 1, team: p.team });
-    });
+  /* ---- 3. Vorsaison-Produktion, zwei Jahre zurueck ---- */
+  // "Letztes Jahr oder in den letzten beiden Jahren Starter" (Nutzerwunsch)
+  // heisst: ein Spieler zaehlt als frueherer Starter, wenn er in PRIOR ODER
+  // in PRIOR_2 unter den Top 30 seiner Position lag.
+  function loadSeasonRanks(season) {
+    const map = new Map();
+    for (const pos of ['QB', 'RB', 'WR', 'TE', 'K']) {
+      let rowsForPos;
+      try {
+        rowsForPos = loadCsv('nfl-stats', 'NFL-data-Players', String(season), `${pos}_season.csv`);
+      } catch { continue; }
+      const scored = rowsForPos
+        .map((r) => ({ name: r.PlayerName, points: num(r.TotalPoints) ?? 0, team: r.Team }))
+        .filter((p) => p.name)
+        .sort((a, b) => b.points - a.points);
+      scored.forEach((p, i) => {
+        map.set(`${nameKey(p.name)}|${pos}`, { points: p.points, posRank: i + 1, team: p.team });
+      });
+    }
+    return map;
   }
+  const prior = loadSeasonRanks(PRIOR);
+  const prior2 = loadSeasonRanks(PRIOR - 1);
 
   /* ---- 4. Punktekurven je Position ---- */
   const curves = {};
@@ -343,7 +438,31 @@ function main() {
   curves.DST = curves.K.length ? curves.K.map((v) => v * 0.85) : [];
 
   /* ---- 5. Spieler zusammenfuehren ---- */
-  const players = dynasty
+  // K und DST kommen ausschliesslich aus ihrer eigenen Positions-Rangliste,
+  // linear auf eine Spaetrunden-Lage abgebildet (siehe KDST_SCALE oben und
+  // tools/README.md fuer die Begruendung). Best/Worst/SD werden mit derselben
+  // Skala transformiert, damit sie zur neuen ECR passen.
+  function buildKdstRows(pos, sourceRows) {
+    const { anchor, spacing } = KDST_SCALE[pos];
+    const scale = (rank) => (rank === null ? null : anchor + (rank - 1) * spacing);
+    return [...sourceRows]
+      .filter((r) => num(r.ecr) !== null)
+      .sort((a, b) => num(a.ecr) - num(b.ecr))
+      .map((r, i) => ({
+        ...r,
+        pos,
+        ecr: String(anchor + i * spacing),
+        best: scale(num(r.best)) === null ? '' : String(scale(num(r.best))),
+        worst: scale(num(r.worst)) === null ? '' : String(scale(num(r.worst))),
+        sd: num(r.sd) === null ? '' : String(num(r.sd) * spacing),
+      }));
+  }
+
+  const skillRows = dynasty.filter((r) => r.pos !== 'K' && r.pos !== 'DST');
+  const kRows = buildKdstRows('K', pageOf('dynasty-k'));
+  const dstRows = buildKdstRows('DST', pageOf('dynasty-dst'));
+
+  const players = [...skillRows, ...kRows, ...dstRows]
     .map((r) => {
       const ecrValue = num(r.ecr);
       if (ecrValue === null) return null;
@@ -351,9 +470,14 @@ function main() {
       const team = teamCode(r.team);
       const key = nameKey(r.player);
       const priorEntry = prior.get(`${key}|${pos}`) || null;
-      // Team-Defenses sind keine Personen: kein Alter, kein Draft-Jahrgang.
-      // Der Namensabgleich wuerde sonst zufaellig Spieler treffen.
+      const prior2Entry = prior2.get(`${key}|${pos}`) || null;
+      // Team-Defenses sind keine Personen: kein Alter, kein Draft-Jahrgang,
+      // kein Rosterstatus. Der Namensabgleich wuerde sonst zufaellig Spieler
+      // treffen (ein "Denver Broncos" ist keine reale Person mit Geburtsdatum).
       const bio = pos === 'DST' ? {} : (bioById.get(r.id) || bioByName.get(key) || {});
+      const rosterEntry = bio.gsisId ? statusByGsis.get(bio.gsisId) : null;
+      const injuryLabel = rosterEntry ? INJURY_ABBR[rosterEntry.abbr] || null : null;
+      const depthEntry = pos === 'RB' && bio.gsisId ? rbDepthByGsis.get(bio.gsisId) : null;
       return {
         age: bio.age ?? null,
         draftYear: bio.draftYear ?? null,
@@ -374,6 +498,14 @@ function main() {
         rookie: rookieNames.has(key) || bio.draftYear === SEASON,
         priorPoints: priorEntry ? Number(priorEntry.points.toFixed(1)) : null,
         priorPosRank: priorEntry ? priorEntry.posRank : null,
+        prior2Points: prior2Entry ? Number(prior2Entry.points.toFixed(1)) : null,
+        prior2PosRank: prior2Entry ? prior2Entry.posRank : null,
+        // Rosterstatus zum Zeitpunkt des Datenabrufs (siehe meta.rosterStatusDate).
+        rosterStatus: rosterEntry?.status ?? null,
+        injuryReserve: injuryLabel !== null,
+        injuryLabel,
+        // Nur fuer RB belegt: Platz in der aktuellen Tiefenaufstellung.
+        depthRank: depthEntry ? depthEntry.posRank : null,
       };
     })
     .filter(Boolean)
@@ -423,6 +555,34 @@ function main() {
   for (const p of players) {
     posRanks[p.pos] = (posRanks[p.pos] || 0) + 1;
     p.boardPosRank = posRanks[p.pos];
+    p.handcuff = false;
+    p.handcuffFor = null;
+  }
+
+  /**
+   * Handcuff: der Running Back auf Tiefenplatz 2 hinter einem Starter, der
+   * selbst startbar ist (Board-Rang bis 90) — faellt der Starter aus, uebernimmt
+   * dieser Spieler die Rolle. Erst ab Board-Rang 150 markiert, sonst waere der
+   * Spieler ohnehin schon aus eigenem Recht gefragt und keine Spaetrunden-Wette.
+   */
+  const rbByTeam = new Map();
+  for (const p of players) {
+    if (p.pos !== 'RB' || p.depthRank === null) continue;
+    if (!rbByTeam.has(p.team)) rbByTeam.set(p.team, []);
+    rbByTeam.get(p.team).push(p);
+  }
+  const HANDCUFF_STARTER_MAX_RANK = 90;
+  const HANDCUFF_MIN_OWN_RANK = 150;
+  const handcuffs = [];
+  for (const list of rbByTeam.values()) {
+    const starter = list.find((p) => p.depthRank === 1);
+    const backup = list.find((p) => p.depthRank === 2);
+    if (!starter || !backup) continue;
+    if (starter.rank <= HANDCUFF_STARTER_MAX_RANK && backup.rank > HANDCUFF_MIN_OWN_RANK) {
+      backup.handcuff = true;
+      backup.handcuffFor = starter.name;
+      handcuffs.push(backup.id);
+    }
   }
 
   // Marktrang aus dem Handelswert. Positive Abweichung heisst: der Markt
@@ -447,12 +607,8 @@ function main() {
     .slice(0, 40)
     .map((p) => p.id);
 
-  // Vorsaison stark, aktuelles Ranking schwach: der Markt preist etwas ein,
-  // typischerweise eine Verletzung, eine Sperre oder einen Rollenwechsel.
-  // Der Vergleich laeuft ueber die REDRAFT-Rangliste: sie bewertet nur diese
-  // Saison. Ein Absturz dort deutet auf Verletzung, Sperre oder Rollenverlust
-  // hin. In der Dynasty-Liste faellt ein Spieler auch schlicht wegen Alters —
-  // das waere ein anderes Signal und gehoert nicht in diese Liste.
+  // Redraft-Positionsrang je Spieler — dient als sekundaeres, schwaecheres
+  // Signal (siehe unten) und bleibt fuer die Detailansicht erhalten.
   const redraftPosRank = new Map();
   const redraftCounter = {};
   for (const r of [...redraft].sort((a, b) => (num(a.ecr) ?? 1e9) - (num(b.ecr) ?? 1e9))) {
@@ -460,19 +616,48 @@ function main() {
     redraftCounter[pos] = (redraftCounter[pos] || 0) + 1;
     redraftPosRank.set(nameKey(r.player), { pos, rank: redraftCounter[pos] });
   }
-  const discount = players
+  for (const p of players) {
+    const entry = redraftPosRank.get(nameKey(p.name));
+    if (entry && entry.pos === p.pos) p.redraftPosRank = entry.rank;
+  }
+
+  /**
+   * Versteckte Werte: letzte Saison unter den Top 30 der Position, jetzt
+   * aber ohne Team oder von der eigenen Liga ausgeschlossen sind sie nicht
+   * brauchbar — deshalb der harte Filter auf ein aktuelles Team und einen
+   * aktiven Rosterstatus.
+   *
+   * Primaeres Kriterium ist ein echtes Signal: der Rosterstatus zeigt den
+   * Spieler auf der Reserve-Liste (verletzt, PUP, NFI) — er faellt aktuell
+   * aus und startet die Saison verspaetet. Das ersetzt die reine Annahme aus
+   * der Vorversion, ein Ranking-Absturz in der Redraft-Liste bedeute
+   * automatisch eine Verletzung: er kann ebenso gut einen Rollenverlust ohne
+   * Verletzung bedeuten. Nur wenn kein Rosterstatus vorliegt (Datei nicht
+   * geladen oder kein gsis-Treffer), greift dieser Redraft-Vergleich ersatzweise.
+   */
+  const hasCurrentTeam = (p) => p.team !== 'FA';
+  const isRosterable = (p) => p.rosterStatus !== 'RET' && p.rosterStatus !== 'CUT';
+  const wasStarter = (p) => (p.priorPosRank !== null && p.priorPosRank <= 30)
+    || (p.prior2PosRank !== null && p.prior2PosRank <= 30);
+  const isSkillPos = (p) => p.pos !== 'K' && p.pos !== 'DST';
+
+  const injured = players.filter((p) => isSkillPos(p) && wasStarter(p) && p.injuryReserve
+    && hasCurrentTeam(p) && isRosterable(p));
+
+  const fallback = players
     .map((p) => {
-      const entry = redraftPosRank.get(nameKey(p.name));
-      if (!entry || entry.pos !== p.pos) return null;
-      p.redraftPosRank = entry.rank;
-      if (p.priorPosRank === null || p.pos === 'K' || p.pos === 'DST') return null;
-      if (p.priorPosRank > 30) return null;
-      return { p, gap: entry.rank - p.priorPosRank };
+      if (!isSkillPos(p) || !wasStarter(p) || p.injuryReserve) return null;
+      if (!hasCurrentTeam(p) || !isRosterable(p)) return null;
+      if (p.rosterStatus !== null && p.rosterStatus !== 'ACT') return null; // Status bekannt, aber kein Verletzungscode
+      if (p.priorPosRank === null || p.redraftPosRank === undefined) return null;
+      const gap = p.redraftPosRank - p.priorPosRank;
+      return gap >= 8 ? { p, gap } : null;
     })
-    .filter((x) => x && x.gap >= 8)
+    .filter(Boolean)
     .sort((a, b) => b.gap - a.gap)
-    .slice(0, 30)
-    .map((x) => { x.p.discountGap = x.gap; return x.p.id; });
+    .map((x) => { x.p.discountGap = x.gap; return x.p; });
+
+  const discount = [...injured, ...fallback].slice(0, 40).map((p) => p.id);
 
   const out = {
     meta: {
@@ -486,15 +671,25 @@ function main() {
       playoffWeeks: PLAYOFF_WEEKS,
       replacement,
       lineGames: observations.length / 2,
+      kdstScale: KDST_SCALE,
+      hasRosterStatus: statusByGsis.size > 0,
+      hasDepthCharts: rbDepthByGsis.size > 0,
+      injuredCount: players.filter((p) => p.injuryReserve).length,
+      handcuffCount: handcuffs.length,
       sources: [
         { name: 'FantasyPros ECR via DynastyProcess', url: 'https://github.com/dynastyprocess/data', date: scrapeDate },
         { name: 'NFL-Spielplan und Quoten via nflverse', url: 'https://github.com/nflverse/nfldata', date: null },
         { name: `Fantasy-Punkte ${PRIOR} via hvpkod`, url: 'https://github.com/hvpkod/NFL-Data', date: null },
+        {
+          name: 'Rosterstatus und Tiefenaufstellung via nflverse-data',
+          url: 'https://github.com/nflverse/nflverse-data',
+          date: null,
+        },
       ],
     },
     teams,
     players,
-    lists: { breakouts, discount },
+    lists: { breakouts, discount, handcuffs },
   };
 
   const target = join(ROOT, 'assets', 'data', 'board.json');
@@ -526,7 +721,7 @@ export function assignTiers(players, groupOf, field = 'tier') {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const { out, target } = main();
+  const { out, target } = await main();
   console.log(`${out.players.length} Spieler → ${target}`);
   console.log(`Quelle vom ${out.meta.scrapeDate}, ${out.meta.lineGames} Spiele mit Quoten`);
 }

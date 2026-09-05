@@ -102,6 +102,12 @@ function playerRow(p, { showRank = true } = {}) {
   if (app.expanded === p.id) cls.push('row--open');
 
   const marks = [];
+  if (p.injuryReserve) {
+    marks.push(`<span class="badge badge--bad" title="Rosterstatus: ${esc(p.injuryLabel)}">${esc(p.injuryLabel)}</span>`);
+  }
+  if (p.handcuff) {
+    marks.push(`<span class="badge badge--backup" title="Rueckt fuer ${esc(p.handcuffFor)} nach, falls der ausfaellt">Backup</span>`);
+  }
   if (p.rookie) marks.push('<span class="badge badge--rookie">Rookie</span>');
   if (p.team === 'FA') marks.push('<span class="badge badge--warn">ohne Team</span>');
   if (p.value >= 12) marks.push(`<span class="badge badge--good">Wert ${signed(p.value)}</span>`);
@@ -109,6 +115,10 @@ function playerRow(p, { showRank = true } = {}) {
 
   const cell = (v, extra = '') => `<span class="c c--num ${extra}">${v}</span>`;
   const tone = (x) => (x > 0.15 ? 'up' : (x < -0.15 ? 'down' : ''));
+  // Vorjahres-Positionierung direkt unter der ECR, wie gewuenscht: nicht als
+  // eigene Spalte, sondern als Ergaenzung der bestehenden ECR-Zelle.
+  const priorLabel = p.priorPosRank ? `${p.pos}${p.priorPosRank} '${String(app.data.meta.priorSeason).slice(-2)}`
+    : (p.rookie ? 'Rookie' : '—');
 
   return `
     <li class="${cls.join(' ')}" data-id="${esc(p.id)}">
@@ -126,7 +136,10 @@ function playerRow(p, { showRank = true } = {}) {
       ${cell(p.age !== null ? p.age.toFixed(1) : '—')}
       ${cell(p.best ?? '—')}
       ${cell(p.worst ?? '—')}
-      ${cell(p.ecr.toFixed(1))}
+      <span class="c c--ecr">
+        <b>${p.ecr.toFixed(1)}</b>
+        <small>${esc(priorLabel)}</small>
+      </span>
       ${cell(p.bye || '—')}
       ${cell(signed(p.offenseIndex * 100), tone(p.offenseIndex))}
       ${cell(signed(p.sosIndex * 100), tone(p.sosIndex))}
@@ -144,10 +157,13 @@ function detailRow(p) {
       : `${signed(p.marketDelta)} Plätze${p.marketDelta > 0 ? ' — günstiger gehandelt' : ''}`],
     ['Redraft-Ranking', p.ecrRedraft ? p.ecrRedraft.toFixed(1) : '—'],
     [`Punkte ${app.data.meta.priorSeason}`, p.priorPoints ? `${p.priorPoints} (${p.pos}${p.priorPosRank})` : 'kein Vorjahreswert'],
+    [`Punkte ${app.data.meta.priorSeason - 1}`, p.prior2Points ? `${p.prior2Points} (${p.pos}${p.prior2PosRank})` : '—'],
+    ['Rosterstatus', p.rosterStatus ? (p.injuryLabel ? `${p.injuryLabel} (Reserve-Liste)` : p.rosterStatus) : 'nicht ermittelt'],
     ['Besitzquote', p.owned ? `${Math.round(p.owned)} %` : '—'],
     ['Erwartete Teampunkte', team ? `${team.impliedSeason} / Spiel` : '—'],
     ['Anpassung', `${signed((p.adjust - 1) * 100, 1)} %`],
   ];
+  if (p.handcuff) facts.splice(2, 0, ['Backup für', p.handcuffFor]);
   const weeks = (team?.schedule || []).map((g) => {
     const d = app.data.teams[g.opp]?.defense ?? 0;
     const cls = d > 0.5 ? 'week--easy' : d < -0.5 ? 'week--hard' : '';
@@ -180,7 +196,7 @@ const HEAD = `
     <span class="c c--num">Alter</span>
     <span class="c c--num">Best</span>
     <span class="c c--num">Worst</span>
-    <span class="c c--num" title="Expert Consensus Ranking von FantasyPros">ECR</span>
+    <span class="c c--ecr" title="Expert Consensus Ranking von FantasyPros, darunter die Position, auf der er letzte Saison abgeschlossen hat">ECR</span>
     <span class="c c--num">Bye</span>
     <span class="c c--num" title="Offense-Staerke des Teams, aus Wettquoten geschaetzt">Off</span>
     <span class="c c--num" title="Durchlaessigkeit der Gegner-Defenses ueber die Saison">SoS</span>
@@ -230,10 +246,11 @@ function renderList(kind) {
 const LEADS = {
   breakouts: 'Rookies und Spieler ohne nennenswerte Vorsaison, die erst ab der vierten Runde '
     + 'gehandelt werden. Genau dort liegt der Hebel: geringer Einsatz, offenes Ergebnis.',
-  discount: 'Spieler, die in der Vorsaison auf ihrer Position weit vorne lagen und jetzt in der '
-    + 'Redraft-Rangliste deutlich abgerutscht sind. Der Markt preist etwas ein — meist eine '
-    + 'Verletzung, eine Sperre oder einen Rollenwechsel. Die Spalte Vorj. zeigt, was der Spieler '
-    + 'zuletzt geleistet hat.',
+  discount: 'Spieler, die letztes Jahr oder im Jahr davor unter den Top 30 ihrer Position lagen, '
+    + 'ein aktuelles Team haben und gerade verletzt sind, also verspätet in die Saison starten '
+    + '(rotes Badge nennt IR/PUP/NFI). Ohne einen solchen Fund als Ersatzsignal, wer stattdessen '
+    + 'in der Redraft-Rangliste stark abgerutscht ist. Backup-Tag markiert zusätzlich Running Backs, '
+    + 'die bei einem Ausfall des Starters selbst zum Starter würden.',
 };
 
 function render() {

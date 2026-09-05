@@ -27,11 +27,15 @@ als vergeben markieren.
 **Rookies & Breakouts** — Rookies und Spieler ohne nennenswerte Vorsaison, die
 erst ab der vierten Runde gehandelt werden.
 
-**Versteckte Werte** — Spieler, die in der Vorsaison auf ihrer Position weit
-vorne lagen und in der aktuellen **Redraft**-Rangliste deutlich abgerutscht
-sind. Der Vergleich läuft bewusst über die Redraft- und nicht über die
-Dynasty-Liste: dort fällt ein Spieler auch schlicht wegen seines Alters, und das
-wäre ein anderes Signal. Die Spalte *Vorj.* zeigt, was er zuletzt geleistet hat.
+**Versteckte Werte** — Spieler, die letztes Jahr oder im Jahr davor unter den
+Top 30 ihrer Position lagen, ein aktuelles Team haben und gerade auf der
+Reserve-Liste stehen (verletzt, PUP oder NFI) — sie starten die Saison
+verspätet. Nur wenn kein solcher Fund vorliegt, greift ersatzweise der
+Vergleich mit der aktuellen **Redraft**-Rangliste (nicht Dynasty: dort fällt
+ein Spieler auch schlicht wegen seines Alters, das wäre ein anderes Signal).
+In dieser Ansicht taucht zusätzlich das **Backup**-Tag auf: Running Backs, die
+bei einem Ausfall des jeweiligen Starters selbst zum Starter würden — die
+klassische Spätrunden-Absicherung.
 
 ## Die Spalten
 
@@ -49,16 +53,19 @@ Quelle.
 | **Pos** | Position mit Rang innerhalb dieses Boards |
 | **Alter** | Alter in Jahren |
 | **Best / Worst** | bester und schlechtester Einzelrang unter den Experten |
-| **ECR** | Expert Consensus Ranking von FantasyPros, der Marktkonsens |
+| **ECR** | Expert Consensus Ranking von FantasyPros, darunter klein die Position, auf der er letzte Saison abgeschlossen hat (z. B. "RB4 '25") |
 | **Bye** | spielfreie Woche |
 | **Off** | Offense-Index des NFL-Teams, aus Wettquoten geschätzt |
 | **SoS** | Spielplan: wie durchlässig die Gegner-Defenses über die Saison sind |
 | **Score** | eigene Bewertung aus ECR plus den beiden Indizes |
 
-Grün und rot markieren Ausschläge über ±15 Punkte. Badges am Namen weisen
-Rookies aus sowie Spieler, die deutlich später (**Wert**) oder früher
-(**Reach**) einzuordnen wären, als das Board sie führt. Ein Klick auf die Zeile
-öffnet Kennzahlen, Wochenspielplan und den Vergleich mit dem Dynasty-Handelswert.
+Grün und rot markieren Ausschläge über ±15 Punkte. Badges am Namen zeigen: ein
+rotes Feld mit **IR/PUP/NFI**, wenn der Spieler gerade auf der Reserve-Liste
+steht; **Backup**, wenn er als Handcuff für einen Starter markiert ist;
+**Rookie**; sowie **Wert**/**Reach**, wenn er deutlich später oder früher
+gehandelt würde, als das Board ihn führt. Ein Klick auf die Zeile öffnet
+Kennzahlen, Wochenspielplan, Rosterstatus und den Vergleich mit dem
+Dynasty-Handelswert.
 
 ## Wie gerechnet wird
 
@@ -150,7 +157,11 @@ Filter, Sortierung, Regler, Detailansicht und beide Nebenlisten.
   verschieben sich gemeinsam.
 - Quoten liegen nur für die vorderen Wochen vor; spätere Werte sind
   Modellschätzungen, keine Marktpreise.
-- Es gibt keinen Verletzungs-Feed. Aktuelle Ausfälle stecken indirekt in der
-  Redraft-Rangliste und damit in der Liste der versteckten Werte.
+- Der Rosterstatus (Reserve-Liste, Handcuffs) ist eine Momentaufnahme des
+  Datenabrufs, keine Live-Verbindung zum Draft-Tag — vor einem wichtigen
+  Draft lohnt sich ein frischer Lauf der Pipeline.
+- Team-Zuordnungen übernimmt die Pipeline unverändert aus dem täglichen
+  FantasyPros-Scrape. Bei sehr frischen Transaktionen kann das überraschen;
+  Details in [`tools/README.md`](tools/README.md).
 - Die Rankings stammen von FantasyPros und sind deren Werk; die Seite bündelt
   sie nur mit eigenen Kennzahlen und weist die Quelle aus.

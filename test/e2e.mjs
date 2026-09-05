@@ -134,7 +134,7 @@ await check('Suche findet einen einzelnen Spieler', async () => {
 await check('Sortierung nach Experten-Ranking ordnet neu', async () => {
   const byScore = await page.locator('.row:not(.row--head) .c--name b').first().innerText();
   await page.selectOption('#fSort', 'ecr');
-  const ecrs = await page.locator('.row:not(.row--head)').first().locator('.c--num').nth(3).innerText();
+  const ecrs = await page.locator('.row:not(.row--head)').first().locator('.c--ecr b').innerText();
   const first = await page.locator('.row:not(.row--head) .c--name b').first().innerText();
   assert.ok(Number(ecrs) < 3, `bestes ECR zuerst (${ecrs})`);
   assert.ok(byScore !== first || true, `Score: ${byScore}, ECR: ${first}`);
@@ -210,6 +210,34 @@ await check('Detailansicht zeigt Kennzahlen und Wochenspielplan', async () => {
   assert.ok(await page.locator('.detail .week--po').count() >= 3, 'Playoff-Wochen markiert');
 });
 
+await check('Verletzte Spieler tragen ein Reserve-Badge, Handcuffs ein Backup-Tag', async () => {
+  const target = await page.evaluate(() => {
+    const injured = window.__board.players.find((p) => p.injuryReserve);
+    const handcuff = window.__board.players.find((p) => p.handcuff);
+    return { injuredId: injured?.id, injuredLabel: injured?.injuryLabel, handcuffId: handcuff?.id, handcuffFor: handcuff?.handcuffFor };
+  });
+  assert.ok(target.injuredId, 'Datensatz enthaelt mindestens einen Verletzungsfund');
+  assert.ok(target.handcuffId, 'Datensatz enthaelt mindestens einen Handcuff');
+
+  await page.fill('#fSearch', '');
+  await page.uncheck('#fHideDrafted');
+  await page.check('#fExpandAll');
+
+  const injuredRow = page.locator(`.row[data-id="${target.injuredId}"]`);
+  await injuredRow.scrollIntoViewIfNeeded();
+  assert.equal(await injuredRow.locator('.badge--bad').innerText(), target.injuredLabel);
+
+  const handcuffRow = page.locator(`.row[data-id="${target.handcuffId}"]`);
+  await handcuffRow.scrollIntoViewIfNeeded();
+  assert.equal(await handcuffRow.locator('.badge--backup').innerText(), 'Backup');
+  const title = await handcuffRow.locator('.badge--backup').getAttribute('title');
+  assert.ok(title.includes(target.handcuffFor), `Tooltip nennt den Starter: ${title}`);
+
+  await handcuffRow.click();
+  const detailText = await handcuffRow.locator('xpath=following-sibling::li[1]').innerText();
+  assert.ok(detailText.includes('Backup für'), 'Detailzeile nennt den Starter ebenfalls');
+});
+
 await check('Spieler laesst sich als weg markieren und ausblenden', async () => {
   const total = await page.evaluate(() => window.__board.players.length);
   // Bei aktivem "Weg ausblenden" verschwindet die Zeile sofort — genau so soll es sein.
@@ -232,16 +260,18 @@ await check('Ansicht Rookies und Breakouts listet spaete Kandidaten', async () =
   assert.equal(await page.locator('#posTabs[hidden]').count(), 1, 'Positionsfilter ausgeblendet');
 });
 
-await check('Ansicht Versteckte Werte zeigt Vorjahrespunkte', async () => {
+await check('Ansicht Versteckte Werte zeigt echte Verletzungsfunde und die Vorjahres-Positionierung', async () => {
   await page.click('.view[data-view="discount"]');
   await page.waitForSelector('#viewLead:not([hidden])');
-  assert.match(await page.locator('#viewLead').innerText(), /Redraft-Rangliste/);
+  assert.match(await page.locator('#viewLead').innerText(), /verletzt|Reserve/);
   const rows = page.locator('.row:not(.row--head)');
   const count = await rows.count();
   assert.ok(count > 10, `${count} Spieler`);
-  // Spalte Vorj. ist die vierte der numerischen Spalten.
-  const prior = await rows.first().locator('.c--num').nth(3).innerText();
-  assert.ok(Number(prior) > 50, `Vorjahrespunkte ausgewiesen (${prior})`);
+  // Die ECR-Zelle traegt die Vorjahres-Positionierung als Kleintext, z.B. "RB2 '25".
+  const priorLabel = await rows.first().locator('.c--ecr small').innerText();
+  assert.match(priorLabel, /^(QB|RB|WR|TE|K|DST)\d+ '\d{2}$|^Rookie$/, `Vorjahres-Label: ${priorLabel}`);
+  // Mindestens ein Eintrag traegt das echte Verletzungs-Badge, nicht nur den Ranking-Abstand.
+  assert.ok(await page.locator('.badge--bad').count() > 0, 'mindestens ein Verletzungs-Badge sichtbar');
 });
 
 await check('Quellen und Methodik sind ausgewiesen', async () => {
@@ -251,7 +281,7 @@ await check('Quellen und Methodik sind ausgewiesen', async () => {
     assert.ok(text.includes(label), `${label} genannt`);
   }
   const links = await page.locator('#sourcesBox a').count();
-  assert.equal(links, 3, 'drei Quellen verlinkt');
+  assert.equal(links, 4, 'vier Quellen verlinkt');
 });
 
 await check('Kopf- und Steuerleiste ueberlagern die Liste nicht', async () => {

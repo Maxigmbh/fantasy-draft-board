@@ -179,6 +179,13 @@ a { color: var(--accent); }
 .badge--good { color: var(--good); background: color-mix(in srgb, var(--good) 16%, transparent); }
 .badge--warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
 .badge--rookie { color: var(--te); background: color-mix(in srgb, var(--te) 18%, transparent); }
+.badge--bad { color: var(--bad); background: color-mix(in srgb, var(--bad) 18%, transparent); }
+.badge--backup { color: var(--k); background: color-mix(in srgb, var(--k) 18%, transparent); }
+
+/* ECR-Zelle: Zahl und Vorjahres-Positionierung uebereinander. */
+.c--ecr { text-align: right; display: flex; flex-direction: column; line-height: 1.15; }
+.c--ecr b { font-variant-numeric: tabular-nums; }
+.c--ecr small { color: var(--muted); font-size: 10px; font-weight: 500; }
 
 /* ---------- Detail ---------- */
 .detail { list-style: none; padding: 12px 14px 14px; background: var(--bg-soft); border-bottom: 1px solid var(--line); }
